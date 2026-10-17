@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -149,6 +150,8 @@ type PatcherQueries interface {
 	GetChatSession(ctx context.Context, id pgtype.UUID) (db.ChatSession, error)
 	GetAgent(ctx context.Context, id pgtype.UUID) (db.Agent, error)
 	GetLarkInstallation(ctx context.Context, id pgtype.UUID) (Installation, error)
+	FindChannelBindingForMember(ctx context.Context, arg db.FindChannelBindingForMemberParams) (db.ChannelUserBinding, error)
+	GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error)
 	GetLarkChatSessionBindingBySession(ctx context.Context, chatSessionID pgtype.UUID) (ChatSessionBinding, error)
 	GetLarkOutboundCardByTask(ctx context.Context, taskID pgtype.UUID) (OutboundCardMessage, error)
 	CreateLarkOutboundCardMessage(ctx context.Context, arg CreateOutboundCardMessageParams) (OutboundCardMessage, error)
@@ -172,6 +175,10 @@ type PatcherConfig struct {
 	Renderer Renderer
 	Now      func() time.Time
 	Logger   *slog.Logger
+	// AppURL is the user-facing Multica web app host (MULTICA_APP_URL,
+	// falling back to FRONTEND_ORIGIN). Inbox pushes use it to build the
+	// deep link; when empty the notification is sent without a link.
+	AppURL string
 }
 
 func (c PatcherConfig) withDefaults() PatcherConfig {
@@ -184,6 +191,7 @@ func (c PatcherConfig) withDefaults() PatcherConfig {
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+	c.AppURL = strings.TrimRight(strings.TrimSpace(c.AppURL), "/")
 	return c
 }
 
@@ -214,6 +222,7 @@ type Patcher struct {
 	client          APIClient
 	typingIndicator *TypingIndicatorManager
 	cfg             PatcherConfig
+	inboxSeen       *inboxDedupe
 }
 
 // NewPatcher constructs a Patcher bound to its dependencies. The
@@ -225,6 +234,7 @@ func NewPatcher(queries PatcherQueries, credentials CredentialsResolver, client 
 		credentials: credentials,
 		client:      client,
 		cfg:         cfg,
+		inboxSeen:   newInboxDedupe(),
 	}
 }
 
@@ -248,6 +258,7 @@ func (p *Patcher) Register(bus *events.Bus) {
 	bus.Subscribe(protocol.EventTaskFailed, p.handleEvent)
 	bus.Subscribe(protocol.EventChatDone, p.handleEvent)
 	bus.Subscribe(protocol.EventTaskCancelled, p.handleEvent)
+	bus.Subscribe(protocol.EventInboxNew, p.handleInboxNew)
 }
 
 func (p *Patcher) handleEvent(e events.Event) {

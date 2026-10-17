@@ -613,7 +613,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// backfills) take it directly; the constructor-based services
 				// wrap *db.Queries internally, so they keep taking queries.
 				cs := lark.NewChannelStore(queries)
-				patcher := lark.NewPatcher(cs, installSvc, larkClient, lark.PatcherConfig{})
+				patcher := lark.NewPatcher(cs, installSvc, larkClient, lark.PatcherConfig{AppURL: appURLFromEnv()})
 				patcher.Register(bus)
 
 				// Typing indicator: shows a "processing" reaction on the user's

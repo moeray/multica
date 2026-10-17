@@ -415,6 +415,47 @@ func (c *httpAPIClient) SendTextMessage(ctx context.Context, p SendTextParams) (
 	return resp.Data.MessageID, nil
 }
 
+// SendUserTextMessage posts a plain text message directly to a user's
+// open_id. Lark creates (or reuses) the Bot's 1:1 conversation with that
+// user, so inbox notifications do not need an existing chat session.
+func (c *httpAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error) {
+	if p.OpenID == "" {
+		return "", errors.New("lark http client: missing open_id")
+	}
+	if p.Text == "" {
+		return "", errors.New("lark http client: missing text")
+	}
+	contentBytes, err := json.Marshal(map[string]string{"text": p.Text})
+	if err != nil {
+		return "", fmt.Errorf("lark http client: encode text content: %w", err)
+	}
+	q := url.Values{}
+	q.Set("receive_id_type", "open_id")
+	path := "/open-apis/im/v1/messages?" + q.Encode()
+	body := map[string]string{
+		"receive_id": string(p.OpenID),
+		"msg_type":   "text",
+		"content":    string(contentBytes),
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	if err := c.doAuthedJSON(ctx, p.InstallationID, http.MethodPost, path, body, &resp); err != nil {
+		return "", fmt.Errorf("lark http client: send user text message: %w", err)
+	}
+	if resp.Code != 0 || resp.Data.MessageID == "" {
+		if isTokenError(resp.Code) {
+			c.invalidateToken(p.InstallationID.AppID)
+		}
+		return "", &APIError{Op: "send user text message", Code: resp.Code, Msg: resp.Msg}
+	}
+	return resp.Data.MessageID, nil
+}
+
 // SendMarkdownCard posts the agent's reply as an interactive card
 // using Lark's schema-2.0 envelope with a single `tag: "markdown"`
 // body element. Lark's client renders the markdown into formatted

@@ -635,6 +635,58 @@ func TestHTTPClient_SendTextMessage_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHTTPClient_SendUserTextMessage_HappyPath pins the open_id-addressed
+// text send used by inbox notifications. Lark opens the Bot's 1:1 chat from
+// the open_id, so the request must not carry a chat_id.
+func TestHTTPClient_SendUserTextMessage_HappyPath(t *testing.T) {
+	fake := newLarkFake(t)
+	fake.stubToken("tok_user_text", 7200)
+	fake.stubSend(
+		map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]string{"message_id": "om_user_text_1"},
+		},
+		func(r *http.Request, body map[string]string) {
+			if r.URL.Path != "/open-apis/im/v1/messages" {
+				t.Errorf("path: got %q want /open-apis/im/v1/messages", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("receive_id_type"); got != "open_id" {
+				t.Errorf("receive_id_type: got %q want open_id", got)
+			}
+			if body["receive_id"] != "ou_user_42" {
+				t.Errorf("receive_id: got %q want ou_user_42", body["receive_id"])
+			}
+			if body["msg_type"] != "text" {
+				t.Errorf("msg_type: got %q want text", body["msg_type"])
+			}
+			var inner map[string]string
+			if err := json.Unmarshal([]byte(body["content"]), &inner); err != nil {
+				t.Fatalf("content is not valid inner JSON: %v (raw=%q)", err, body["content"])
+			}
+			if inner["text"] != "Heads up" {
+				t.Errorf("inner content.text: got %q want Heads up", inner["text"])
+			}
+		},
+	)
+
+	c := newTestClient(fake, time.Now)
+	msgID, err := c.SendUserTextMessage(context.Background(), SendUserTextParams{
+		InstallationID: testCreds(),
+		OpenID:         OpenID("ou_user_42"),
+		Text:           "Heads up",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if msgID != "om_user_text_1" {
+		t.Errorf("message id: got %q want om_user_text_1", msgID)
+	}
+	if got := fake.lastAuth(); got != "Bearer tok_user_text" {
+		t.Errorf("Authorization header: got %q want Bearer tok_user_text", got)
+	}
+}
+
 // TestHTTPClient_SendTextMessage_ReplyInThread pins the wire shape of a
 // threaded reply: when ReplyTarget is set the client must POST to the
 // reply endpoint (/messages/<id>/reply), carry reply_in_thread=true, and

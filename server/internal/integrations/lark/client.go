@@ -45,6 +45,12 @@ type APIClient interface {
 	// chrome the user doesn't want.
 	SendTextMessage(ctx context.Context, p SendTextParams) (string, error)
 
+	// SendUserTextMessage posts a plain text message directly to a
+	// Lark user's open_id, creating the Bot's 1:1 conversation with that
+	// user when it does not exist yet. Inbox notifications use this to
+	// reach a bound member without requiring an existing chat session.
+	SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error)
+
 	// SendMarkdownCard posts the agent's reply as a Lark interactive
 	// card (schema 2.0) with a single `tag: "markdown"` body element.
 	// This is the path the chat-reply router takes when the body
@@ -312,6 +318,15 @@ type SendTextParams struct {
 	ReplyTarget ReplyTarget
 }
 
+// SendUserTextParams is the input shape for posting a plain text
+// message directly to a user's open_id. Lark opens (or reuses) the
+// Bot's 1:1 conversation with that user, so no chat_id is needed.
+type SendUserTextParams struct {
+	InstallationID InstallationCredentials
+	OpenID         OpenID
+	Text           string
+}
+
 // SendMarkdownCardParams is the input shape for posting an agent
 // reply as a Lark interactive card with a markdown body element.
 // Markdown is forwarded to Lark verbatim; the client builds the
@@ -433,6 +448,11 @@ func NewStubAPIClient(log *slog.Logger) APIClient {
 }
 
 func (s *stubAPIClient) IsConfigured() bool { return false }
+
+func (s *stubAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error) {
+	s.log.Warn("lark stub client: SendUserTextMessage called", "open_id", string(p.OpenID))
+	return "", ErrAPIClientNotConfigured
+}
 
 func (s *stubAPIClient) SendInteractiveCard(ctx context.Context, p SendCardParams) (string, error) {
 	s.log.Warn("lark stub client: SendInteractiveCard called", "chat_id", string(p.ChatID))

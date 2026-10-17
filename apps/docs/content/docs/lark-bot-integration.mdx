@@ -62,6 +62,10 @@ Open **Settings → Messaging → Lark** to view the Bots connected in the works
 
 After disconnecting, the Bot stops receiving new messages. Existing conversations and audit records are not deleted.
 
+## Inbox notifications
+
+After a member binds the Bot, new items in their Multica inbox are also delivered to the Bot's direct message with that member. Only an active binding receives pushes; agents, unbound members, and revoked bindings are skipped. Each notification carries the title, a short excerpt, and a link back to the Multica inbox. A failed push is logged and never affects the inbox item itself.
+
 ## Self-hosting setup
 
 Multica Cloud needs no extra configuration. A self-hosted deployment must first set a key used to encrypt Bot credentials:

@@ -27,6 +27,10 @@ type fakePatcherQueries struct {
 	deliveryErr         error
 	installation        Installation
 	installationErr     error
+	memberBinding       db.ChannelUserBinding
+	memberBindingErr    error
+	workspace           db.Workspace
+	workspaceErr        error
 	agent               db.Agent
 	agentErr            error
 	card                OutboundCardMessage
@@ -79,6 +83,12 @@ func (f *fakePatcherQueries) GetAgent(ctx context.Context, id pgtype.UUID) (db.A
 func (f *fakePatcherQueries) GetLarkInstallation(ctx context.Context, id pgtype.UUID) (Installation, error) {
 	return f.installation, f.installationErr
 }
+func (f *fakePatcherQueries) FindChannelBindingForMember(ctx context.Context, arg db.FindChannelBindingForMemberParams) (db.ChannelUserBinding, error) {
+	return f.memberBinding, f.memberBindingErr
+}
+func (f *fakePatcherQueries) GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error) {
+	return f.workspace, f.workspaceErr
+}
 func (f *fakePatcherQueries) GetLarkChatSessionBindingBySession(ctx context.Context, sessID pgtype.UUID) (ChatSessionBinding, error) {
 	return f.binding, f.bindingErr
 }
@@ -117,6 +127,9 @@ type fakeAPIClient struct {
 	textSendReturn string
 	mdCardErr      error
 	mdCardReturn   string
+	userTextSent   []SendUserTextParams
+	userTextErr    error
+	userTextReturn string
 	bindingSent    []BindingPromptParams
 	// threadReplyErr, when non-nil, is returned by the three send
 	// methods whenever the call carries a thread ReplyTarget, while the
@@ -160,6 +173,12 @@ func (f *fakeAPIClient) SendTextMessage(ctx context.Context, p SendTextParams) (
 		return "", f.threadReplyErr
 	}
 	return f.textSendReturn, f.textSendErr
+}
+func (f *fakeAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userTextSent = append(f.userTextSent, p)
+	return f.userTextReturn, f.userTextErr
 }
 func (f *fakeAPIClient) SendMarkdownCard(ctx context.Context, p SendMarkdownCardParams) (string, error) {
 	f.mu.Lock()
