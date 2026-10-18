@@ -7,7 +7,6 @@ package lark
 import (
 	"net/url"
 	"strings"
-	"unicode/utf8"
 )
 
 // inboxBodyMaxLen bounds the body excerpt in runes. An inbox card is a
@@ -21,13 +20,10 @@ const inboxBodyMaxLen = 300
 //	{body excerpt}
 //	{link}
 //
-// The link segment is omitted when no app URL is configured, matching the
-// WeCom inbox push: a title-only message is better than a broken link.
-func buildInboxText(item map[string]any, workspaceID, slug, appURL string) string {
+// The link segment is omitted when no app URL is configured or the workspace
+// slug is unknown: a title-only message is better than a broken link.
+func buildInboxText(item map[string]any, slug, appURL string) string {
 	title := strings.TrimSpace(inboxItemString(item, "title"))
-	if title == "" {
-		title = strings.TrimSpace(inboxItemString(item, "type"))
-	}
 	body := strings.TrimSpace(inboxItemString(item, "body"))
 	if title == "" && body == "" {
 		return ""
@@ -42,29 +38,27 @@ func buildInboxText(item map[string]any, workspaceID, slug, appURL string) strin
 		}
 		b.WriteString(body)
 	}
-	if link := inboxItemLink(item, workspaceID, slug, appURL); link != "" {
+	if link := inboxItemLink(item, slug, appURL); link != "" {
 		b.WriteString("\n")
 		b.WriteString(link)
 	}
 	return b.String()
 }
 
-// inboxItemLink builds {appURL}/{slug|workspaceID}/inbox?issue={issueID}.
-// The query parameter is omitted for chat-only notifications, which carry no
-// issue_id.
-func inboxItemLink(item map[string]any, workspaceID, slug, appURL string) string {
+// inboxItemLink builds {appURL}/{slug}/inbox?issue={issueID}. The web app
+// routes by workspace slug only; a workspace UUID is not a valid segment, so
+// an unknown slug drops the link instead of pointing at a 404. The query
+// parameter is omitted for chat-only notifications, which carry no issue_id.
+func inboxItemLink(item map[string]any, slug, appURL string) string {
 	appURL = strings.TrimRight(strings.TrimSpace(appURL), "/")
-	if appURL == "" {
+	slug = strings.TrimSpace(slug)
+	if appURL == "" || slug == "" {
 		return ""
-	}
-	segment := slug
-	if segment == "" {
-		segment = workspaceID
 	}
 	var b strings.Builder
 	b.WriteString(appURL)
 	b.WriteString("/")
-	b.WriteString(url.PathEscape(segment))
+	b.WriteString(url.PathEscape(slug))
 	b.WriteString("/inbox")
 	if issueID := inboxItemString(item, "issue_id"); issueID != "" {
 		b.WriteString("?issue=")
@@ -89,20 +83,18 @@ func inboxItemString(item map[string]any, key string) string {
 }
 
 // truncateInboxRunes trims s to at most maxRunes runes, never splitting a
-// multi-byte character.
+// multi-byte character. The last rune is an ellipsis so the reader can tell
+// the excerpt was cut.
 func truncateInboxRunes(s string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return ""
 	}
-	if utf8.RuneCountInString(s) <= maxRunes {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
-	i := 0
-	for pos := range s {
-		if i == maxRunes {
-			return s[:pos]
-		}
-		i++
+	if maxRunes == 1 {
+		return "\u2026"
 	}
-	return s
+	return string(runes[:maxRunes-1]) + "\u2026"
 }

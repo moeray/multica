@@ -660,6 +660,9 @@ func TestHTTPClient_SendUserTextMessage_HappyPath(t *testing.T) {
 			if body["msg_type"] != "text" {
 				t.Errorf("msg_type: got %q want text", body["msg_type"])
 			}
+			if body["uuid"] != "4444dddd-4444-4444-4444-444444444444" {
+				t.Errorf("uuid: got %q want the idempotency key", body["uuid"])
+			}
 			var inner map[string]string
 			if err := json.Unmarshal([]byte(body["content"]), &inner); err != nil {
 				t.Fatalf("content is not valid inner JSON: %v (raw=%q)", err, body["content"])
@@ -675,6 +678,7 @@ func TestHTTPClient_SendUserTextMessage_HappyPath(t *testing.T) {
 		InstallationID: testCreds(),
 		OpenID:         OpenID("ou_user_42"),
 		Text:           "Heads up",
+		UUID:           "4444dddd-4444-4444-4444-444444444444",
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)

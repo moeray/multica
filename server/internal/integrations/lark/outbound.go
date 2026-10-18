@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -151,6 +152,7 @@ type PatcherQueries interface {
 	GetAgent(ctx context.Context, id pgtype.UUID) (db.Agent, error)
 	GetLarkInstallation(ctx context.Context, id pgtype.UUID) (Installation, error)
 	FindChannelBindingForMember(ctx context.Context, arg db.FindChannelBindingForMemberParams) (db.ChannelUserBinding, error)
+	FindChannelBindingForMemberOnAgentInstallation(ctx context.Context, arg db.FindChannelBindingForMemberOnAgentInstallationParams) (db.ChannelUserBinding, error)
 	GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error)
 	GetLarkChatSessionBindingBySession(ctx context.Context, chatSessionID pgtype.UUID) (ChatSessionBinding, error)
 	GetLarkOutboundCardByTask(ctx context.Context, taskID pgtype.UUID) (OutboundCardMessage, error)
@@ -223,6 +225,9 @@ type Patcher struct {
 	typingIndicator *TypingIndicatorManager
 	cfg             PatcherConfig
 	inboxSeen       *inboxDedupe
+	inboxQueue      chan inboxJob
+	inboxOnce       sync.Once
+	inboxPending    sync.WaitGroup
 }
 
 // NewPatcher constructs a Patcher bound to its dependencies. The
@@ -235,6 +240,7 @@ func NewPatcher(queries PatcherQueries, credentials CredentialsResolver, client 
 		client:      client,
 		cfg:         cfg,
 		inboxSeen:   newInboxDedupe(),
+		inboxQueue:  make(chan inboxJob, inboxQueueSize),
 	}
 }
 

@@ -325,6 +325,11 @@ type SendUserTextParams struct {
 	InstallationID InstallationCredentials
 	OpenID         OpenID
 	Text           string
+	// UUID is Lark's idempotency key for message creation. The inbox
+	// relay derives a stable value per item/recipient/installation so a
+	// duplicate publish across replicas or a retry after a lost
+	// response does not create a second chat message.
+	UUID string
 }
 
 // SendMarkdownCardParams is the input shape for posting an agent

@@ -17,27 +17,31 @@ import (
 )
 
 type fakePatcherQueries struct {
-	mu                  sync.Mutex
-	task                db.AgentTaskQueue
-	taskErr             error
-	taskChannelIngested bool
-	binding             ChatSessionBinding
-	bindingErr          error
-	delivery            db.ChannelTaskDelivery
-	deliveryErr         error
-	installation        Installation
-	installationErr     error
-	memberBinding       db.ChannelUserBinding
-	memberBindingErr    error
-	workspace           db.Workspace
-	workspaceErr        error
-	agent               db.Agent
-	agentErr            error
-	card                OutboundCardMessage
-	cardErr             error
-	created             []CreateOutboundCardMessageParams
-	createReturn        OutboundCardMessage
-	statusUpdates       []UpdateOutboundCardStatusParams
+	mu                    sync.Mutex
+	task                  db.AgentTaskQueue
+	taskErr               error
+	taskChannelIngested   bool
+	binding               ChatSessionBinding
+	bindingErr            error
+	delivery              db.ChannelTaskDelivery
+	deliveryErr           error
+	installation          Installation
+	installationErr       error
+	memberBinding         db.ChannelUserBinding
+	memberBindingErr      error
+	agentMemberBinding    db.ChannelUserBinding
+	agentMemberBindingErr error
+	agentBindingCalls     int
+	workspace             db.Workspace
+	workspaceErr          error
+	installationGetIDs    []pgtype.UUID
+	agent                 db.Agent
+	agentErr              error
+	card                  OutboundCardMessage
+	cardErr               error
+	created               []CreateOutboundCardMessageParams
+	createReturn          OutboundCardMessage
+	statusUpdates         []UpdateOutboundCardStatusParams
 	// deliveriesByTask overrides the derived delivery row per task_id, so a
 	// test can give two concurrent runs different frozen trigger snapshots.
 	// Empty falls back to the binding-derived row below.
@@ -81,10 +85,19 @@ func (f *fakePatcherQueries) GetAgent(ctx context.Context, id pgtype.UUID) (db.A
 	return f.agent, f.agentErr
 }
 func (f *fakePatcherQueries) GetLarkInstallation(ctx context.Context, id pgtype.UUID) (Installation, error) {
+	f.mu.Lock()
+	f.installationGetIDs = append(f.installationGetIDs, id)
+	f.mu.Unlock()
 	return f.installation, f.installationErr
 }
 func (f *fakePatcherQueries) FindChannelBindingForMember(ctx context.Context, arg db.FindChannelBindingForMemberParams) (db.ChannelUserBinding, error) {
 	return f.memberBinding, f.memberBindingErr
+}
+func (f *fakePatcherQueries) FindChannelBindingForMemberOnAgentInstallation(ctx context.Context, arg db.FindChannelBindingForMemberOnAgentInstallationParams) (db.ChannelUserBinding, error) {
+	f.mu.Lock()
+	f.agentBindingCalls++
+	f.mu.Unlock()
+	return f.agentMemberBinding, f.agentMemberBindingErr
 }
 func (f *fakePatcherQueries) GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error) {
 	return f.workspace, f.workspaceErr
@@ -130,7 +143,13 @@ type fakeAPIClient struct {
 	userTextSent   []SendUserTextParams
 	userTextErr    error
 	userTextReturn string
-	bindingSent    []BindingPromptParams
+	// userTextStarted receives one signal per SendUserTextMessage call and
+	// userTextBlock, when non-nil, holds the call until closed or the
+	// context expires. Together they let a test prove the event publisher
+	// returns while a send is still in flight.
+	userTextStarted chan struct{}
+	userTextBlock   chan struct{}
+	bindingSent     []BindingPromptParams
 	// threadReplyErr, when non-nil, is returned by the three send
 	// methods whenever the call carries a thread ReplyTarget, while the
 	// attempt is still recorded. Tests inject either a classified
@@ -176,8 +195,23 @@ func (f *fakeAPIClient) SendTextMessage(ctx context.Context, p SendTextParams) (
 }
 func (f *fakeAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.userTextSent = append(f.userTextSent, p)
+	started := f.userTextStarted
+	block := f.userTextBlock
+	f.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	return f.userTextReturn, f.userTextErr
 }
 func (f *fakeAPIClient) SendMarkdownCard(ctx context.Context, p SendMarkdownCardParams) (string, error) {

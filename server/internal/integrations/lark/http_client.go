@@ -437,6 +437,9 @@ func (c *httpAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextP
 		"msg_type":   "text",
 		"content":    string(contentBytes),
 	}
+	if p.UUID != "" {
+		body["uuid"] = p.UUID
+	}
 	var resp struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
