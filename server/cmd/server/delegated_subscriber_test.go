@@ -449,51 +449,43 @@ func TestUnsubscribeIsDurableAgainstAutoRules(t *testing.T) {
 	}
 }
 
-// TestDeliverToSubscriber_DelegatedTier pins the noise contract. The tier drops
-// churn and nothing else: a child FINISHING is real signal, one per piece of work
-// a reviewer has to act on. An earlier cut suppressed those in favour of a
-// synthesized "whole batch finished" roll-up; that machinery is gone (see the
-// MUL-5483 thread), and the tree-level signal comes from the parent's own status
-// transition, which this same rule delivers.
-//
-// Which statuses ARE handoffs is issueStatusIsHandoff's job and is covered by
-// TestIssueStatusIsHandoff; this table covers the routing on top of that answer.
+// TestDeliverToSubscriber_DelegatedTier pins the noise contract. The delegated
+// tier receives only direct mentions, failures/blocks, and comments: the final
+// agent comment carries the task result, so status transitions are suppressed
+// to avoid sending a second notification for the same outcome.
 func TestDeliverToSubscriber_DelegatedTier(t *testing.T) {
 	cases := []struct {
 		name      string
 		reason    string
 		notifType string
-		handoff   bool
 		want      bool
 	}{
-		{"direct subscriber keeps every event", "creator", "status_changed", false, true},
-		{"direct subscriber keeps comments", "assignee", "new_comment", false, true},
+		{"direct subscriber keeps every event", "creator", "status_changed", true},
+		{"direct subscriber keeps comments", "assignee", "new_comment", true},
 
-		{"delegated skips routine progress", "delegated", "status_changed", false, false},
-		{"delegated skips comment churn", "delegated", "new_comment", false, false},
-		{"delegated skips assignee churn", "delegated", "assignee_changed", false, false},
-		{"delegated skips date churn", "delegated", "due_date_changed", false, false},
-		{"delegated skips non-status events even on a handoff", "delegated", "due_date_changed", true, false},
+		{"delegated skips routine progress", "delegated", "status_changed", false},
+		{"delegated skips assignee churn", "delegated", "assignee_changed", false},
+		{"delegated skips date churn", "delegated", "due_date_changed", false},
 
-		{"delegated gets the handoff", "delegated", "status_changed", true, true},
+		{"delegated gets the final comment", "delegated", "new_comment", true},
 
-		{"delegated always gets direct mentions", "delegated", "mentioned", false, true},
-		{"delegated always gets failures", "delegated", "task_failed", false, true},
-		{"delegated always gets agent_blocked", "delegated", "agent_blocked", false, true},
+		{"delegated always gets direct mentions", "delegated", "mentioned", true},
+		{"delegated always gets failures", "delegated", "task_failed", true},
+		{"delegated always gets agent_blocked", "delegated", "agent_blocked", true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := deliverToSubscriber(tc.reason, tc.notifType, tc.handoff); got != tc.want {
-				t.Fatalf("deliverToSubscriber(%q, %q, %v) = %v, want %v",
-					tc.reason, tc.notifType, tc.handoff, got, tc.want)
+			if got := deliverToSubscriber(tc.reason, tc.notifType); got != tc.want {
+				t.Fatalf("deliverToSubscriber(%q, %q) = %v, want %v",
+					tc.reason, tc.notifType, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestIssueStatusIsHandoff pins the predicate behind BOTH the delegated tier and
-// the stale task_failed dismissal (MUL-7379).
+// TestIssueStatusIsHandoff pins the predicate behind the stale task_failed
+// dismissal (MUL-7379).
 //
 // The built-in rows reproduce, exactly, the two hand-kept allowlists this
 // replaced. The custom rows are the regression: before MUL-7240 every custom
@@ -569,12 +561,12 @@ func TestIssueStatusIsHandoff(t *testing.T) {
 	})
 }
 
-// TestDelegatedTier_ChildCompletionDeliversExactlyOnce is the case a unit test of
-// deliverToSubscriber alone cannot catch. status_changed bubbles from a child to
-// the parent's subscribers, and the common shape is a human who is BOTH a direct
-// subscriber of the parent and a delegate on the child. They must be told the
-// child finished, and told once — not twice via the bubble, and not zero times.
-func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
+// TestDelegatedTier_CompletionCommentCarriesResultOnce covers the path a unit
+// test of deliverToSubscriber alone cannot catch. The human is BOTH a direct
+// subscriber of the parent and a delegate on the child. status_changed must not
+// reach them directly or through the parent bubble; the agent's completion
+// comment is the one notification, and it carries the result body.
+func TestDelegatedTier_CompletionCommentCarriesResultOnce(t *testing.T) {
 	ctx := context.Background()
 	queries := db.New(testPool)
 	bus := events.New()
@@ -635,11 +627,31 @@ func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
 		t.Fatalf("routine child progress reached the inbox %d time(s) — the parent bubble bypassed the tier", n)
 	}
 
-	// Completion delivers, exactly once despite two paths to the same person.
+	// The completion status is suppressed too: the final comment carries the
+	// result, and the parent bubble must not smuggle the event back in.
 	notifySubscribers(ctx, queries, bus, childID, "in_review", testWorkspaceID,
 		agentEvent, nil, "status_changed", "info", "child", "", emptyDetails)
+	if n := countInbox(); n != 0 {
+		t.Fatalf("completion status reached the delegate inbox %d time(s); the final comment should be the only push", n)
+	}
+
+	// The agent's final comment is the one notification, and its body is the
+	// result the human needs to read.
+	const resultBody = "Done: all tests pass."
+	notifySubscribers(ctx, queries, bus, childID, "in_review", testWorkspaceID,
+		agentEvent, nil, "new_comment", "info", "child", resultBody, emptyDetails)
 	if n := countInbox(); n != 1 {
-		t.Fatalf("expected exactly 1 inbox row for the child completion, got %d", n)
+		t.Fatalf("expected exactly 1 inbox row for the completion comment, got %d", n)
+	}
+	var gotBody string
+	if err := testPool.QueryRow(ctx,
+		`SELECT body FROM inbox_item WHERE recipient_type='member' AND recipient_id=$1 AND issue_id=$2`,
+		testUserID, childID,
+	).Scan(&gotBody); err != nil {
+		t.Fatalf("read completion comment body: %v", err)
+	}
+	if gotBody != resultBody {
+		t.Fatalf("inbox body = %q, want the final comment %q", gotBody, resultBody)
 	}
 }
 
@@ -648,7 +660,7 @@ func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
 // unrecognized reason must fall back to FULL delivery — silently dropping a
 // user's notifications is the worse failure.
 func TestDeliverToSubscriber_UnknownReasonIsDirect(t *testing.T) {
-	if !deliverToSubscriber("some_future_reason", "new_comment", false) {
+	if !deliverToSubscriber("some_future_reason", "new_comment") {
 		t.Fatal("an unrecognized subscription reason must default to full delivery")
 	}
 }

@@ -459,6 +459,56 @@ func (c *httpAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextP
 	return resp.Data.MessageID, nil
 }
 
+// SendUserMarkdownCard posts an interactive card directly to a user's open_id.
+// The card uses schema 2.0 with a single markdown body element, which is what
+// lets inbox notifications carry a full comment instead of a plain-text
+// excerpt. renderInboxCard keeps the encoded card under inboxCardMaxBytes and
+// preserves the trailing detail link when it has to truncate the body.
+func (c *httpAPIClient) SendUserMarkdownCard(ctx context.Context, p SendUserMarkdownCardParams) (string, error) {
+	if p.OpenID == "" {
+		return "", errors.New("lark http client: missing open_id")
+	}
+	if p.Markdown == "" {
+		return "", errors.New("lark http client: missing markdown body")
+	}
+	cardBytes, err := renderInboxCard(inboxCard{
+		Title:    p.Title,
+		Markdown: p.Markdown,
+		Summary:  p.Summary,
+	}, inboxCardMaxBytes)
+	if err != nil {
+		return "", fmt.Errorf("lark http client: render user markdown card: %w", err)
+	}
+	q := url.Values{}
+	q.Set("receive_id_type", "open_id")
+	path := "/open-apis/im/v1/messages?" + q.Encode()
+	body := map[string]string{
+		"receive_id": string(p.OpenID),
+		"msg_type":   "interactive",
+		"content":    string(cardBytes),
+	}
+	if p.UUID != "" {
+		body["uuid"] = p.UUID
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	if err := c.doAuthedJSON(ctx, p.InstallationID, http.MethodPost, path, body, &resp); err != nil {
+		return "", fmt.Errorf("lark http client: send user markdown card: %w", err)
+	}
+	if resp.Code != 0 || resp.Data.MessageID == "" {
+		if isTokenError(resp.Code) {
+			c.invalidateToken(p.InstallationID.AppID)
+		}
+		return "", &APIError{Op: "send user markdown card", Code: resp.Code, Msg: resp.Msg}
+	}
+	return resp.Data.MessageID, nil
+}
+
 // SendMarkdownCard posts the agent's reply as an interactive card
 // using Lark's schema-2.0 envelope with a single `tag: "markdown"`
 // body element. Lark's client renders the markdown into formatted

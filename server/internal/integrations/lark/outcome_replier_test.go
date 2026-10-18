@@ -24,6 +24,7 @@ type stubAPIClientWithRecorder struct {
 	interactiveOut []SendCardParams
 	textOut        []SendTextParams
 	userTextOut    []SendUserTextParams
+	userCardOut    []SendUserMarkdownCardParams
 	sendErr        error
 	textErr        error
 	bindingErr     error
@@ -72,6 +73,13 @@ func (s *stubAPIClientWithRecorder) SendUserTextMessage(ctx context.Context, p S
 	defer s.mu.Unlock()
 	s.userTextOut = append(s.userTextOut, p)
 	return "lark-user-text-msg-id", nil
+}
+
+func (s *stubAPIClientWithRecorder) SendUserMarkdownCard(ctx context.Context, p SendUserMarkdownCardParams) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userCardOut = append(s.userCardOut, p)
+	return "lark-user-card-msg-id", nil
 }
 
 func (s *stubAPIClientWithRecorder) SendMarkdownCard(ctx context.Context, p SendMarkdownCardParams) (string, error) {

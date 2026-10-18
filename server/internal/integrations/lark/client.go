@@ -51,6 +51,12 @@ type APIClient interface {
 	// reach a bound member without requiring an existing chat session.
 	SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error)
 
+	// SendUserMarkdownCard posts an inbox notification as an interactive
+	// schema-2.0 card directly to a user's open_id. The card carries a
+	// single markdown body element so comments render with their full
+	// formatting instead of a truncated plain-text excerpt.
+	SendUserMarkdownCard(ctx context.Context, p SendUserMarkdownCardParams) (string, error)
+
 	// SendMarkdownCard posts the agent's reply as a Lark interactive
 	// card (schema 2.0) with a single `tag: "markdown"` body element.
 	// This is the path the chat-reply router takes when the body
@@ -332,6 +338,24 @@ type SendUserTextParams struct {
 	UUID string
 }
 
+// SendUserMarkdownCardParams is the input shape for posting an inbox
+// notification as an interactive card directly to a user's open_id.
+type SendUserMarkdownCardParams struct {
+	InstallationID InstallationCredentials
+	OpenID         OpenID
+	// Title is rendered as the card header. Empty falls back to the first
+	// line of Markdown.
+	Title string
+	// Markdown is the card body. Lark renders it as GFM-ish markdown.
+	Markdown string
+	// Summary is the single-line preview shown in the chat list and desktop
+	// notification. Empty falls back to Title.
+	Summary string
+	// UUID is Lark's idempotency key for message creation; the inbox relay
+	// derives a stable value per item/recipient/installation.
+	UUID string
+}
+
 // SendMarkdownCardParams is the input shape for posting an agent
 // reply as a Lark interactive card with a markdown body element.
 // Markdown is forwarded to Lark verbatim; the client builds the
@@ -456,6 +480,11 @@ func (s *stubAPIClient) IsConfigured() bool { return false }
 
 func (s *stubAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextParams) (string, error) {
 	s.log.Warn("lark stub client: SendUserTextMessage called", "open_id", string(p.OpenID))
+	return "", ErrAPIClientNotConfigured
+}
+
+func (s *stubAPIClient) SendUserMarkdownCard(ctx context.Context, p SendUserMarkdownCardParams) (string, error) {
+	s.log.Warn("lark stub client: SendUserMarkdownCard called", "open_id", string(p.OpenID))
 	return "", ErrAPIClientNotConfigured
 }
 

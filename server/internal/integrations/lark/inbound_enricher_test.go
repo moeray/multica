@@ -95,6 +95,9 @@ func (f *enricherFakeClient) SendTextMessage(context.Context, SendTextParams) (s
 func (f *enricherFakeClient) SendUserTextMessage(context.Context, SendUserTextParams) (string, error) {
 	return "", nil
 }
+func (f *enricherFakeClient) SendUserMarkdownCard(context.Context, SendUserMarkdownCardParams) (string, error) {
+	return "", nil
+}
 func (f *enricherFakeClient) SendMarkdownCard(context.Context, SendMarkdownCardParams) (string, error) {
 	return "", nil
 }

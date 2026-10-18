@@ -143,12 +143,17 @@ type fakeAPIClient struct {
 	userTextSent   []SendUserTextParams
 	userTextErr    error
 	userTextReturn string
+	userCardSent   []SendUserMarkdownCardParams
+	userCardErr    error
+	userCardReturn string
 	// userTextStarted receives one signal per SendUserTextMessage call and
 	// userTextBlock, when non-nil, holds the call until closed or the
 	// context expires. Together they let a test prove the event publisher
 	// returns while a send is still in flight.
 	userTextStarted chan struct{}
 	userTextBlock   chan struct{}
+	userCardStarted chan struct{}
+	userCardBlock   chan struct{}
 	bindingSent     []BindingPromptParams
 	// threadReplyErr, when non-nil, is returned by the three send
 	// methods whenever the call carries a thread ReplyTarget, while the
@@ -214,6 +219,27 @@ func (f *fakeAPIClient) SendUserTextMessage(ctx context.Context, p SendUserTextP
 	}
 	return f.userTextReturn, f.userTextErr
 }
+func (f *fakeAPIClient) SendUserMarkdownCard(ctx context.Context, p SendUserMarkdownCardParams) (string, error) {
+	f.mu.Lock()
+	f.userCardSent = append(f.userCardSent, p)
+	started := f.userCardStarted
+	block := f.userCardBlock
+	f.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return f.userCardReturn, f.userCardErr
+}
 func (f *fakeAPIClient) SendMarkdownCard(ctx context.Context, p SendMarkdownCardParams) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -270,7 +296,11 @@ func newTestPatcher(t *testing.T) (*Patcher, *fakePatcherQueries, *fakeAPIClient
 		agent:   db.Agent{Name: "TestAgent"},
 		cardErr: pgx.ErrNoRows,
 	}
-	api := &fakeAPIClient{sendReturn: "lark_card_msg_1", textSendReturn: "lark_text_msg_1"}
+	api := &fakeAPIClient{
+		sendReturn:     "lark_card_msg_1",
+		textSendReturn: "lark_text_msg_1",
+		userCardReturn: "lark_user_card_msg_1",
+	}
 	p := NewPatcher(q, fakeCredentials{secret: "shh"}, api, PatcherConfig{
 		Logger: newDiscardLogger(),
 		Now:    time.Now,

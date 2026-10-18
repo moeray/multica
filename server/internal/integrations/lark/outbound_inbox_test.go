@@ -1,6 +1,7 @@
 package lark
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -88,19 +89,25 @@ func TestLarkInboxNewDeliversToBoundMember(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(inboxTestItem()))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(api.userTextSent))
+	if len(api.userCardSent) != 1 {
+		t.Fatalf("sent %d cards, want 1", len(api.userCardSent))
 	}
-	got := api.userTextSent[0]
+	if len(api.userTextSent) != 0 {
+		t.Fatalf("sent %d text fallbacks for a successful card, want 0", len(api.userTextSent))
+	}
+	got := api.userCardSent[0]
 	if got.OpenID != OpenID(inboxTestChannelUserID) {
 		t.Errorf("open_id = %q, want %q", got.OpenID, inboxTestChannelUserID)
 	}
 	if got.InstallationID.AppID != "cli_test_app" {
 		t.Errorf("app_id = %q, want cli_test_app", got.InstallationID.AppID)
 	}
-	want := "Task completed\nAgent finished the task.\nhttps://app.example/acme/inbox?issue=" + inboxTestIssueID
-	if got.Text != want {
-		t.Errorf("text = %q, want %q", got.Text, want)
+	if got.Title != "Task completed" {
+		t.Errorf("title = %q, want Task completed", got.Title)
+	}
+	wantMarkdown := "Agent finished the task.\n\n[查看详情](https://app.example/acme/inbox?issue=" + inboxTestIssueID + ")"
+	if got.Markdown != wantMarkdown {
+		t.Errorf("markdown = %q, want %q", got.Markdown, wantMarkdown)
 	}
 	if got.UUID != inboxProviderUUID(inboxTestItemID, inboxTestMemberID, inboxTestInstallation) {
 		t.Errorf("uuid = %q, want stable inbox idempotency key", got.UUID)
@@ -119,8 +126,8 @@ func TestLarkInboxNewSkipsAgentRecipients(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(item))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 0 {
-		t.Fatalf("agent recipient received %d messages, want 0", len(api.userTextSent))
+	if len(api.userCardSent)+len(api.userTextSent) != 0 {
+		t.Fatalf("agent recipient received %d messages, want 0", len(api.userCardSent)+len(api.userTextSent))
 	}
 }
 
@@ -131,8 +138,8 @@ func TestLarkInboxNewSkipsUnboundMember(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(inboxTestItem()))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 0 {
-		t.Fatalf("unbound member received %d messages, want 0", len(api.userTextSent))
+	if len(api.userCardSent)+len(api.userTextSent) != 0 {
+		t.Fatalf("unbound member received %d messages, want 0", len(api.userCardSent)+len(api.userTextSent))
 	}
 }
 
@@ -144,29 +151,30 @@ func TestLarkInboxNewSkipsInactiveInstallation(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(inboxTestItem()))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 0 {
-		t.Fatalf("inactive installation sent %d messages, want 0", len(api.userTextSent))
+	if len(api.userCardSent)+len(api.userTextSent) != 0 {
+		t.Fatalf("inactive installation sent %d messages, want 0", len(api.userCardSent)+len(api.userTextSent))
 	}
 }
 
 func TestLarkInboxNewSendFailureReleasesDedupeClaim(t *testing.T) {
 	p, q, api := newTestPatcher(t)
 	bindInboxTestMember(t, q)
+	api.userCardErr = errors.New("card endpoint down")
 	api.userTextErr = errors.New("network down")
 	item := inboxTestItem()
 
 	p.handleInboxNew(inboxTestEvent(item))
 	waitForInbox(t, p)
-	if len(api.userTextSent) != 1 {
-		t.Fatalf("attempts = %d, want 1", len(api.userTextSent))
+	if len(api.userCardSent) != 1 || len(api.userTextSent) != 1 {
+		t.Fatalf("attempts = card:%d text:%d, want 1 each", len(api.userCardSent), len(api.userTextSent))
 	}
 
 	// A failed send must not suppress the same item for the rest of the
 	// dedupe TTL.
 	p.handleInboxNew(inboxTestEvent(item))
 	waitForInbox(t, p)
-	if len(api.userTextSent) != 2 {
-		t.Fatalf("attempts after retry = %d, want 2", len(api.userTextSent))
+	if len(api.userCardSent) != 2 || len(api.userTextSent) != 2 {
+		t.Fatalf("attempts after retry = card:%d text:%d, want 2 each", len(api.userCardSent), len(api.userTextSent))
 	}
 
 	// A later item must still be processed after the failed send.
@@ -174,8 +182,33 @@ func TestLarkInboxNewSendFailureReleasesDedupeClaim(t *testing.T) {
 	next["id"] = "6666ffff-6666-6666-6666-666666666666"
 	p.handleInboxNew(inboxTestEvent(next))
 	waitForInbox(t, p)
-	if len(api.userTextSent) != 3 {
-		t.Fatalf("attempts after later item = %d, want 3", len(api.userTextSent))
+	if len(api.userCardSent) != 3 || len(api.userTextSent) != 3 {
+		t.Fatalf("attempts after later item = card:%d text:%d, want 3 each", len(api.userCardSent), len(api.userTextSent))
+	}
+}
+
+func TestLarkInboxNewFallsBackToTextWhenCardFails(t *testing.T) {
+	p, q, api := newTestPatcher(t)
+	p.cfg.AppURL = "https://app.example"
+	bindInboxTestMember(t, q)
+	api.userCardErr = errors.New("card rejected")
+
+	p.handleInboxNew(inboxTestEvent(inboxTestItem()))
+	waitForInbox(t, p)
+
+	if len(api.userCardSent) != 1 {
+		t.Fatalf("card attempts = %d, want 1", len(api.userCardSent))
+	}
+	if len(api.userTextSent) != 1 {
+		t.Fatalf("text fallback attempts = %d, want 1", len(api.userTextSent))
+	}
+	want := buildInboxText(inboxTestItem(), "acme", "https://app.example")
+	if got := api.userTextSent[0].Text; got != want {
+		t.Errorf("fallback text = %q, want %q", got, want)
+	}
+	wantUUID := inboxProviderUUID(inboxTestItemID, inboxTestMemberID, inboxTestInstallation)
+	if got := api.userTextSent[0].UUID; got != wantUUID {
+		t.Errorf("fallback uuid = %q, want the card's idempotency key %q", got, wantUUID)
 	}
 }
 
@@ -188,16 +221,16 @@ func TestLarkInboxNewDeduplicatesSameItem(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(item))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 1 {
-		t.Fatalf("duplicate item sent %d messages, want 1", len(api.userTextSent))
+	if len(api.userCardSent) != 1 || len(api.userTextSent) != 0 {
+		t.Fatalf("duplicate item sent card:%d text:%d, want 1 card and 0 text", len(api.userCardSent), len(api.userTextSent))
 	}
 
 	next := inboxTestItem()
 	next["id"] = "7777aaaa-7777-7777-7777-777777777777"
 	p.handleInboxNew(inboxTestEvent(next))
 	waitForInbox(t, p)
-	if len(api.userTextSent) != 2 {
-		t.Fatalf("new item sent %d messages total, want 2", len(api.userTextSent))
+	if len(api.userCardSent) != 2 || len(api.userTextSent) != 0 {
+		t.Fatalf("new item sent card:%d text:%d total, want 2 cards and 0 text", len(api.userCardSent), len(api.userTextSent))
 	}
 }
 
@@ -216,10 +249,10 @@ func TestLarkInboxNewPrefersActingAgentsBot(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(item))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(api.userTextSent))
+	if len(api.userCardSent) != 1 {
+		t.Fatalf("sent %d cards, want 1", len(api.userCardSent))
 	}
-	if got := api.userTextSent[0].OpenID; got != OpenID("ou_agent_bot") {
+	if got := api.userCardSent[0].OpenID; got != OpenID("ou_agent_bot") {
 		t.Errorf("open_id = %q, want the acting agent's bot (ou_agent_bot)", got)
 	}
 	if q.agentBindingCalls != 1 {
@@ -241,10 +274,10 @@ func TestLarkInboxNewFallsBackToRecipientWideBinding(t *testing.T) {
 	p.handleInboxNew(inboxTestEvent(item))
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(api.userTextSent))
+	if len(api.userCardSent) != 1 {
+		t.Fatalf("sent %d cards, want 1", len(api.userCardSent))
 	}
-	if got := api.userTextSent[0].OpenID; got != OpenID(inboxTestChannelUserID) {
+	if got := api.userCardSent[0].OpenID; got != OpenID(inboxTestChannelUserID) {
 		t.Errorf("open_id = %q, want recipient-wide binding %q", got, inboxTestChannelUserID)
 	}
 	if q.agentBindingCalls != 1 {
@@ -258,8 +291,8 @@ func TestLarkInboxNewPublisherDoesNotWaitForSlowSend(t *testing.T) {
 	started := make(chan struct{}, 1)
 	block := make(chan struct{})
 	api.mu.Lock()
-	api.userTextStarted = started
-	api.userTextBlock = block
+	api.userCardStarted = started
+	api.userCardBlock = block
 	api.mu.Unlock()
 
 	begin := time.Now()
@@ -271,13 +304,13 @@ func TestLarkInboxNewPublisherDoesNotWaitForSlowSend(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
-		t.Fatal("worker never reached SendUserTextMessage")
+		t.Fatal("worker never reached SendUserMarkdownCard")
 	}
 	close(block)
 	waitForInbox(t, p)
 
-	if len(api.userTextSent) != 1 {
-		t.Fatalf("sent %d messages after release, want 1", len(api.userTextSent))
+	if len(api.userCardSent) != 1 {
+		t.Fatalf("sent %d cards after release, want 1", len(api.userCardSent))
 	}
 }
 
@@ -316,6 +349,142 @@ func TestInboxProviderUUIDIsStableAndScoped(t *testing.T) {
 	}
 	if base == inboxProviderUUID("item", "recipient", "other-installation") {
 		t.Fatal("installation must be part of the provider uuid")
+	}
+}
+
+func TestBuildInboxCard(t *testing.T) {
+	item := inboxTestItem()
+
+	t.Run("card content", func(t *testing.T) {
+		got := buildInboxCard(item, "acme", "https://app.example/")
+		if got.Title != "Task completed" {
+			t.Errorf("title = %q, want Task completed", got.Title)
+		}
+		if got.Summary != "Task completed" {
+			t.Errorf("summary = %q, want Task completed", got.Summary)
+		}
+		wantMarkdown := "Agent finished the task.\n\n[查看详情](https://app.example/acme/inbox?issue=" + inboxTestIssueID + ")"
+		if got.Markdown != wantMarkdown {
+			t.Errorf("markdown = %q, want %q", got.Markdown, wantMarkdown)
+		}
+	})
+
+	t.Run("schema 2.0 envelope", func(t *testing.T) {
+		raw, err := renderInboxCard(buildInboxCard(item, "acme", "https://app.example"), inboxCardMaxBytes)
+		if err != nil {
+			t.Fatalf("render card: %v", err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("card is not valid JSON: %v", err)
+		}
+		if doc["schema"] != "2.0" {
+			t.Errorf("schema = %v, want 2.0", doc["schema"])
+		}
+		header, _ := doc["header"].(map[string]any)
+		title, _ := header["title"].(map[string]any)
+		if title["content"] != "Task completed" {
+			t.Errorf("header title = %v, want Task completed", title["content"])
+		}
+		body, _ := doc["body"].(map[string]any)
+		elements, _ := body["elements"].([]any)
+		if len(elements) != 1 {
+			t.Fatalf("body elements = %d, want 1", len(elements))
+		}
+		element, _ := elements[0].(map[string]any)
+		if element["tag"] != "markdown" {
+			t.Errorf("body element tag = %v, want markdown", element["tag"])
+		}
+		content, _ := element["content"].(string)
+		if !strings.Contains(content, "[查看详情](https://app.example/acme/inbox?issue="+inboxTestIssueID+")") {
+			t.Errorf("markdown body is missing the detail link: %q", content)
+		}
+		config, _ := doc["config"].(map[string]any)
+		summary, _ := config["summary"].(map[string]any)
+		if summary["content"] != "Task completed" {
+			t.Errorf("summary = %v, want Task completed", summary["content"])
+		}
+	})
+
+	t.Run("no app url drops link", func(t *testing.T) {
+		got := buildInboxCard(item, "acme", "")
+		if strings.Contains(got.Markdown, "http") {
+			t.Errorf("card should not contain a link: %q", got.Markdown)
+		}
+	})
+
+	t.Run("missing slug drops link", func(t *testing.T) {
+		got := buildInboxCard(item, "", "https://app.example")
+		if strings.Contains(got.Markdown, "http") {
+			t.Errorf("card should not contain a broken link: %q", got.Markdown)
+		}
+	})
+
+	t.Run("empty title uses first body line", func(t *testing.T) {
+		untitled := inboxTestItem()
+		untitled["title"] = ""
+		got := buildInboxCard(untitled, "acme", "https://app.example")
+		if got.Title != "Agent finished the task." {
+			t.Errorf("title = %q, want first body line", got.Title)
+		}
+		if strings.Contains(got.Title, "task_completed") {
+			t.Errorf("card should not expose the raw notification type: %q", got.Title)
+		}
+	})
+
+	t.Run("chat item has no issue query", func(t *testing.T) {
+		chatItem := inboxTestItem()
+		delete(chatItem, "issue_id")
+		got := buildInboxCard(chatItem, "acme", "https://app.example")
+		if !strings.Contains(got.Markdown, "(https://app.example/acme/inbox)") {
+			t.Errorf("chat link = %q, want no issue query", got.Markdown)
+		}
+	})
+
+	t.Run("body is not capped at the fallback excerpt length", func(t *testing.T) {
+		longItem := inboxTestItem()
+		longItem["body"] = strings.Repeat("x", inboxBodyMaxLen+200)
+		got := buildInboxCard(longItem, "acme", "")
+		if len([]rune(got.Markdown)) != inboxBodyMaxLen+200 {
+			t.Errorf("card body runes = %d, want the full %d", len([]rune(got.Markdown)), inboxBodyMaxLen+200)
+		}
+	})
+}
+
+func TestRenderInboxCardTruncatesToByteBudget(t *testing.T) {
+	item := inboxTestItem()
+	item["body"] = strings.Repeat("长", 20000)
+
+	raw, err := renderInboxCard(buildInboxCard(item, "acme", "https://app.example"), inboxCardMaxBytes)
+	if err != nil {
+		t.Fatalf("render oversized card: %v", err)
+	}
+	if len(raw) > inboxCardMaxBytes {
+		t.Fatalf("card encoded to %d bytes, want <= %d", len(raw), inboxCardMaxBytes)
+	}
+	if !json.Valid(raw) {
+		t.Fatal("truncated card is not valid JSON")
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode truncated card: %v", err)
+	}
+	body, _ := doc["body"].(map[string]any)
+	elements, _ := body["elements"].([]any)
+	if len(elements) != 1 {
+		t.Fatalf("body elements = %d, want 1", len(elements))
+	}
+	element, _ := elements[0].(map[string]any)
+	content, _ := element["content"].(string)
+	if !strings.HasSuffix(content, "[查看详情](https://app.example/acme/inbox?issue="+inboxTestIssueID+")") {
+		t.Errorf("truncated card must keep the detail link at the end: %q", content)
+	}
+	if !strings.Contains(content, "\u2026") {
+		t.Errorf("truncated card body should end with an ellipsis: %q", content)
+	}
+	if len([]rune(content)) <= inboxBodyMaxLen {
+		t.Errorf("truncated card body = %d runes, want more than the fallback limit %d", len([]rune(content)), inboxBodyMaxLen)
 	}
 }
 

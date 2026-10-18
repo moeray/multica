@@ -230,26 +230,57 @@ func (p *Patcher) deliverInbox(ctx context.Context, item map[string]any, itemID,
 				"workspace_id", workspaceIDStr)
 		}
 	}
-	content := buildInboxText(item, slug, p.cfg.AppURL)
-	if content == "" {
-		return
-	}
-
 	installationID := uuidString(binding.InstallationID)
 	dedupeKey := inboxDedupeKey(itemID, recipientIDStr, installationID)
 	if !p.inboxSeen.claim(dedupeKey) {
 		return
 	}
-	if _, err := p.client.SendUserTextMessage(ctx, SendUserTextParams{
-		InstallationID: creds,
-		OpenID:         OpenID(binding.ChannelUserID),
-		Text:           content,
-		UUID:           inboxProviderUUID(itemID, recipientIDStr, installationID),
-	}); err != nil {
+
+	card := buildInboxCard(item, slug, p.cfg.AppURL)
+	if card.Markdown == "" && card.Title == "" {
 		p.inboxSeen.release(dedupeKey)
-		p.cfg.Logger.Warn("lark patcher: inbox push failed",
-			"error", err, "item_id", itemID, "installation_id", installationID, "recipient_id", recipientIDStr)
 		return
+	}
+
+	// The markdown card is the primary path: it carries the full comment
+	// body instead of the legacy 300-rune excerpt. Fall back to plain text
+	// only when card rendering/sending fails, so a malformed or oversized
+	// card cannot drop the notification.
+	providerUUID := inboxProviderUUID(itemID, recipientIDStr, installationID)
+	delivered := false
+	if card.Markdown != "" {
+		if _, err := p.client.SendUserMarkdownCard(ctx, SendUserMarkdownCardParams{
+			InstallationID: creds,
+			OpenID:         OpenID(binding.ChannelUserID),
+			Title:          card.Title,
+			Markdown:       card.Markdown,
+			Summary:        card.Summary,
+			UUID:           providerUUID,
+		}); err != nil {
+			p.cfg.Logger.Warn("lark patcher: inbox card push failed; falling back to text",
+				"error", err, "item_id", itemID, "installation_id", installationID, "recipient_id", recipientIDStr)
+		} else {
+			delivered = true
+		}
+	}
+
+	if !delivered {
+		content := buildInboxText(item, slug, p.cfg.AppURL)
+		if content == "" {
+			p.inboxSeen.release(dedupeKey)
+			return
+		}
+		if _, err := p.client.SendUserTextMessage(ctx, SendUserTextParams{
+			InstallationID: creds,
+			OpenID:         OpenID(binding.ChannelUserID),
+			Text:           content,
+			UUID:           providerUUID,
+		}); err != nil {
+			p.inboxSeen.release(dedupeKey)
+			p.cfg.Logger.Warn("lark patcher: inbox push failed",
+				"error", err, "item_id", itemID, "installation_id", installationID, "recipient_id", recipientIDStr)
+			return
+		}
 	}
 	p.cfg.Logger.Debug("lark patcher: inbox delivered",
 		"item_id", itemID, "installation_id", installationID, "recipient_id", recipientIDStr)

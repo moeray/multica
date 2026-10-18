@@ -691,6 +691,128 @@ func TestHTTPClient_SendUserTextMessage_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHTTPClient_SendUserMarkdownCard_HappyPath pins the open_id-addressed
+// schema-2.0 card shape used by inbox notifications: interactive msg_type,
+// header title, one markdown body element, and the summary preview.
+func TestHTTPClient_SendUserMarkdownCard_HappyPath(t *testing.T) {
+	fake := newLarkFake(t)
+	fake.stubToken("tok_user_card", 7200)
+	fake.stubSend(
+		map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]string{"message_id": "om_user_card_1"},
+		},
+		func(r *http.Request, body map[string]string) {
+			if r.URL.Path != "/open-apis/im/v1/messages" {
+				t.Errorf("path: got %q want /open-apis/im/v1/messages", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("receive_id_type"); got != "open_id" {
+				t.Errorf("receive_id_type: got %q want open_id", got)
+			}
+			if body["receive_id"] != "ou_user_42" {
+				t.Errorf("receive_id: got %q want ou_user_42", body["receive_id"])
+			}
+			if body["msg_type"] != "interactive" {
+				t.Errorf("msg_type: got %q want interactive", body["msg_type"])
+			}
+			if body["uuid"] != "6666eeee-6666-6666-6666-666666666666" {
+				t.Errorf("uuid: got %q want the idempotency key", body["uuid"])
+			}
+			var card map[string]any
+			if err := json.Unmarshal([]byte(body["content"]), &card); err != nil {
+				t.Fatalf("content is not valid card JSON: %v (raw=%q)", err, body["content"])
+			}
+			if card["schema"] != "2.0" {
+				t.Errorf("card.schema: got %v want \"2.0\"", card["schema"])
+			}
+			header, _ := card["header"].(map[string]any)
+			title, _ := header["title"].(map[string]any)
+			if title["tag"] != "plain_text" || title["content"] != "Issue title" {
+				t.Errorf("header.title = %v, want plain_text Issue title", title)
+			}
+			bodyDoc, _ := card["body"].(map[string]any)
+			elements, _ := bodyDoc["elements"].([]any)
+			if len(elements) != 1 {
+				t.Fatalf("expected exactly one body element; got %d", len(elements))
+			}
+			el, _ := elements[0].(map[string]any)
+			if el["tag"] != "markdown" {
+				t.Errorf("element.tag: got %v want \"markdown\"", el["tag"])
+			}
+			if el["content"] != "Agent result\n\n[查看详情](https://app.example/acme/inbox?issue=abc)" {
+				t.Errorf("markdown body = %q", el["content"])
+			}
+			config, _ := card["config"].(map[string]any)
+			summary, _ := config["summary"].(map[string]any)
+			if summary["content"] != "Issue title" {
+				t.Errorf("config.summary.content = %v, want Issue title", summary["content"])
+			}
+		},
+	)
+
+	c := newTestClient(fake, time.Now)
+	msgID, err := c.SendUserMarkdownCard(context.Background(), SendUserMarkdownCardParams{
+		InstallationID: testCreds(),
+		OpenID:         OpenID("ou_user_42"),
+		Title:          "Issue title",
+		Markdown:       "Agent result\n\n[查看详情](https://app.example/acme/inbox?issue=abc)",
+		Summary:        "Issue title",
+		UUID:           "6666eeee-6666-6666-6666-666666666666",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if msgID != "om_user_card_1" {
+		t.Errorf("message id: got %q want om_user_card_1", msgID)
+	}
+	if got := fake.lastAuth(); got != "Bearer tok_user_card" {
+		t.Errorf("Authorization header: got %q want Bearer tok_user_card", got)
+	}
+}
+
+func TestHTTPClient_SendUserMarkdownCard_TruncatesOversizedBody(t *testing.T) {
+	fake := newLarkFake(t)
+	fake.stubToken("tok_user_card_big", 7200)
+	fake.stubSend(
+		map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"data": map[string]string{"message_id": "om_user_card_big"},
+		},
+		func(r *http.Request, body map[string]string) {
+			if len(body["content"]) > inboxCardMaxBytes {
+				t.Errorf("content is %d bytes, want <= %d", len(body["content"]), inboxCardMaxBytes)
+			}
+			if !json.Valid([]byte(body["content"])) {
+				t.Fatal("truncated card content is not valid JSON")
+			}
+			var card map[string]any
+			if err := json.Unmarshal([]byte(body["content"]), &card); err != nil {
+				t.Fatalf("decode card: %v", err)
+			}
+			bodyDoc, _ := card["body"].(map[string]any)
+			elements, _ := bodyDoc["elements"].([]any)
+			el, _ := elements[0].(map[string]any)
+			content, _ := el["content"].(string)
+			if !strings.HasSuffix(content, "[查看详情](https://app.example/acme/inbox)") {
+				t.Errorf("truncated card must keep the detail link: %q", content)
+			}
+		},
+	)
+
+	c := newTestClient(fake, time.Now)
+	if _, err := c.SendUserMarkdownCard(context.Background(), SendUserMarkdownCardParams{
+		InstallationID: testCreds(),
+		OpenID:         OpenID("ou_user_42"),
+		Title:          "Huge result",
+		Markdown:       strings.Repeat("长", 20000) + "\n\n[查看详情](https://app.example/acme/inbox)",
+		Summary:        "Huge result",
+	}); err != nil {
+		t.Fatalf("send oversized card: %v", err)
+	}
+}
+
 // TestHTTPClient_SendTextMessage_ReplyInThread pins the wire shape of a
 // threaded reply: when ReplyTarget is set the client must POST to the
 // reply endpoint (/messages/<id>/reply), carry reply_in_thread=true, and

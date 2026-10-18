@@ -79,18 +79,22 @@ var parentBubbleNotifTypes = map[string]bool{
 
 // delegatedAlwaysNotifTypes are the events a DELEGATED subscriber (reason=
 // 'delegated' — an agent created this issue on their behalf, MUL-5483) receives
-// unconditionally: they are either addressed at the human directly, or they are
-// exceptions that stall the work until a human looks.
+// unconditionally: they are either addressed at the human directly, exceptions
+// that stall the work until a human looks, or the final comment that carries
+// the task result. Status transitions are deliberately absent: an agent's
+// completion comment already carries the result, so pushing both the comment
+// and the status_changed event would notify the same person twice.
 var delegatedAlwaysNotifTypes = map[string]bool{
 	"mentioned":     true,
+	"new_comment":   true,
 	"task_failed":   true,
 	"agent_blocked": true,
 }
 
 // issueStatusIsHandoff reports whether ARRIVING on this status hands the issue
-// back to a human. It is the one predicate behind both the delegated-subscriber
-// tier and the stale task_failed dismissal, which used to be two hand-kept
-// allowlists that drifted apart (MUL-7379).
+// back to a human. It decides when a stale task_failed notice is retired;
+// delegated delivery no longer depends on it, because the final comment now
+// carries the result and the status transition itself is suppressed.
 //
 // It decides on LIFECYCLE plus one exact key, the split MUL-7364 established:
 //
@@ -142,32 +146,19 @@ func issueStatusIsHandoff(
 // deliverToSubscriber reports whether a subscriber row should receive this
 // notification type. Direct subscriptions (creator / assignee / commenter /
 // mentioned / manual / autopilot) are unchanged — they opted in to this issue,
-// explicitly or by acting on it. Only the delegated tier is narrowed, and only
-// to drop churn.
+// explicitly or by acting on it. The delegated tier only receives the events
+// listed in delegatedAlwaysNotifTypes.
 //
-// A child finishing is NOT churn: "sub-issue X is ready for review" is exactly
-// the signal a delegated watcher needs, and there is one per piece of real work.
-// An earlier cut suppressed those and synthesized a single "the whole batch
-// finished" roll-up from sibling state instead. That was both the wrong shape
-// (see the MUL-5483 thread) and redundant: the human is subscribed to the PARENT
-// as well, so when the agent moves the parent to in_review/done that transition
-// delivers here — which is the natural "the tree is done" signal. Deriving it
-// from children was reinventing a notification the platform already sends.
-//
-// statusIsHandoff is the resolved issueStatusIsHandoff answer for the issue's
-// current status, so the catalog is read once per notification rather than once
-// per subscriber row.
-func deliverToSubscriber(reason, notifType string, statusIsHandoff bool) bool {
+// status_changed is intentionally not delivered to delegated subscribers: the
+// final comment is pushed as new_comment with its full body, so delivering the
+// status transition too would produce a duplicate notification for the same
+// result. The handoff status remains relevant for stale task_failed cleanup,
+// not for delegated delivery.
+func deliverToSubscriber(reason, notifType string) bool {
 	if reason != "delegated" {
 		return true
 	}
-	if delegatedAlwaysNotifTypes[notifType] {
-		return true
-	}
-	if notifType != "status_changed" {
-		return false
-	}
-	return statusIsHandoff
+	return delegatedAlwaysNotifTypes[notifType]
 }
 
 // notifTypeToGroup maps each InboxItemType to a user-configurable preference
@@ -387,21 +378,6 @@ func notifyIssueSubscribers(
 	notified := map[string]bool{}
 	tierSuppressed := map[string]bool{}
 
-	// Resolve the handoff question once for the whole subscriber list, rather
-	// than per row. A built-in key answers without a query, so the common path
-	// still performs no I/O. (MUL-7379)
-	//
-	// FAIL OPEN. A catalog read can only fail for a CUSTOM status, and the two
-	// outcomes are not symmetric: a spare inbox row costs one dismissal, while
-	// a dropped one silently strands the issue on a status whose whole purpose
-	// is to be waited on, with no other signal to the delegated subscriber.
-	statusIsHandoff, err := issueStatusIsHandoff(ctx, queries, parseUUID(workspaceID), issueStatus)
-	if err != nil {
-		slog.Warn("resolve issue status handoff for delegated delivery; delivering",
-			"issue_id", subscriberIssueID, "status", issueStatus, "error", err)
-		statusIsHandoff = true
-	}
-
 	subs, err := queries.ListIssueSubscribers(ctx, parseUUID(subscriberIssueID))
 	if err != nil {
 		slog.Error("failed to list subscribers for notification",
@@ -443,7 +419,7 @@ func notifyIssueSubscribers(
 
 		// Delegated subscriptions deliver a narrower event set than direct
 		// ones — see deliverToSubscriber.
-		if !deliverToSubscriber(sub.Reason, notifType, statusIsHandoff) {
+		if !deliverToSubscriber(sub.Reason, notifType) {
 			tierSuppressed[subID] = true
 			continue
 		}
