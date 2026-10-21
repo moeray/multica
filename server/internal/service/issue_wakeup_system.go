@@ -558,6 +558,7 @@ func (s *IssueWakeupService) dispatchSystem(ctx context.Context, prev db.IssueWa
 			item, inserted, err := inboxwriter.CreateIfEligible(ctx, q, db.CreateInboxItemParams{
 				ID: dbid.NewV7(), WorkspaceID: issue.WorkspaceID, RecipientType: "member", RecipientID: current.ID,
 				Type: "children_done", Severity: "info", IssueID: issue.ID, Title: issue.Title,
+				Body:      pgtype.Text{String: "All child issues are done.", Valid: true},
 				ActorType: pgtype.Text{String: "system", Valid: true}, Details: details,
 			})
 			if err != nil {

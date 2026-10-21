@@ -7938,7 +7938,7 @@ func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.Ag
 		Severity:      "info",
 		IssueID:       issue.ID,
 		Title:         issue.Title,
-		Body:          pgtype.Text{},
+		Body:          pgtype.Text{String: "Issue created from your quick-create request.", Valid: true},
 		ActorType:     pgtype.Text{String: "agent", Valid: true},
 		ActorID:       task.AgentID,
 		Details:       details,

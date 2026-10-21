@@ -324,6 +324,11 @@ func TestChildDoneNotifiesMemberAssignee(t *testing.T) {
 	if n := dbfx.Count(t, `SELECT count(*) FROM inbox_item WHERE recipient_id = $1 AND issue_id = $2 AND type = 'children_done'`, userID, fx.parent.ID); n != 1 {
 		t.Fatalf("children_done inbox items = %d, want 1", n)
 	}
+	var body string
+	dbfx.QueryRow(t, `SELECT body FROM inbox_item WHERE recipient_id = $1 AND issue_id = $2 AND type = 'children_done'`, userID, fx.parent.ID).Scan(&body)
+	if body != "All child issues are done." {
+		t.Fatalf("children_done body = %q", body)
+	}
 	if runs := childDoneRuns(t, fx.parent.ID); len(runs) != 0 {
 		t.Fatalf("member parent started runs: %+v", runs)
 	}

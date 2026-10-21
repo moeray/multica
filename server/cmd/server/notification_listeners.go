@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -54,6 +55,67 @@ func priorityLabel(p string) string {
 		return l
 	}
 	return p
+}
+
+func dateLabel(s string) string {
+	if s == "" {
+		return "None"
+	}
+	return s
+}
+
+// defaultNotificationBody gives notifications a useful Feishu/inbox preview
+// when the caller has no body of its own. The structured details still remain
+// available to clients that render the event; this only fills the visible text.
+func defaultNotificationBody(notifType, body string, details []byte) string {
+	if body != "" {
+		return body
+	}
+	var d map[string]string
+	_ = json.Unmarshal(details, &d)
+	switch notifType {
+	case "status_changed":
+		from, to := statusLabel(d["from"]), statusLabel(d["to"])
+		if from != "" && to != "" {
+			return fmt.Sprintf("Status: %s → %s", from, to)
+		}
+		return "Status changed"
+	case "priority_changed":
+		from, to := priorityLabel(d["from"]), priorityLabel(d["to"])
+		if from != "" && to != "" {
+			return fmt.Sprintf("Priority: %s → %s", from, to)
+		}
+		return "Priority changed"
+	case "start_date_changed":
+		return fmt.Sprintf("Start date: %s → %s", dateLabel(d["from"]), dateLabel(d["to"]))
+	case "due_date_changed":
+		return fmt.Sprintf("Due date: %s → %s", dateLabel(d["from"]), dateLabel(d["to"]))
+	case "assignee_changed":
+		return "Assignee changed"
+	case "issue_assigned":
+		return "Assigned to you"
+	case "unassigned":
+		return "Unassigned from you"
+	case "reaction_added":
+		if d["emoji"] != "" {
+			return fmt.Sprintf("Reaction: %s", d["emoji"])
+		}
+		return "Reaction added"
+	case "task_failed":
+		return "The agent run failed. Open the issue for details."
+	case "mentioned":
+		return "You were mentioned."
+	case "new_comment":
+		return "New comment"
+	case "issue_subscribed":
+		return "You are subscribed to this issue."
+	case "quick_create_done":
+		return "Issue created from your quick-create request."
+	case "children_done":
+		return "All child issues are done."
+	default:
+		return ""
+	}
 }
 
 var emptyDetails = []byte("{}")
@@ -433,7 +495,7 @@ func notifyIssueSubscribers(
 			Severity:      severity,
 			IssueID:       parseUUID(targetIssueID),
 			Title:         title,
-			Body:          util.StrToText(body),
+			Body:          util.StrToText(defaultNotificationBody(notifType, body, details)),
 			ActorType:     util.StrToText(e.ActorType),
 			ActorID:       optionalUUID(e.ActorID),
 			Details:       details,
@@ -502,7 +564,7 @@ func notifyDirect(
 		Severity:      severity,
 		IssueID:       parseUUID(issueID),
 		Title:         title,
-		Body:          util.StrToText(body),
+		Body:          util.StrToText(defaultNotificationBody(notifType, body, details)),
 		ActorType:     util.StrToText(e.ActorType),
 		ActorID:       optionalUUID(e.ActorID),
 		Details:       details,
@@ -625,7 +687,7 @@ func notifyMentionedMembers(
 			Severity:      "info",
 			IssueID:       parseUUID(issueID),
 			Title:         title,
-			Body:          util.StrToText(body),
+			Body:          util.StrToText(defaultNotificationBody("mentioned", body, details)),
 			ActorType:     util.StrToText(e.ActorType),
 			ActorID:       optionalUUID(e.ActorID),
 			Details:       details,
@@ -693,7 +755,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 		if issue.Description != nil && *issue.Description != "" {
 			mentions := parseMentions(*issue.Description)
 			notifyMentionedMembers(bus, queries, e, mentions, issue.ID, issue.Title, issue.Status,
-				issue.Title, "", skip, emptyDetails)
+				issue.Title, "You were mentioned in the issue description.", skip, emptyDetails)
 		}
 	})
 
@@ -882,7 +944,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 				}
 				skip := map[string]bool{e.ActorID: true}
 				notifyMentionedMembers(bus, queries, e, added, issue.ID, issue.Title, issue.Status,
-					issue.Title, "", skip, emptyDetails)
+					issue.Title, "You were mentioned in the issue description.", skip, emptyDetails)
 			}
 		}
 	})

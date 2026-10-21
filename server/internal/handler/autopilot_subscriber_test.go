@@ -723,7 +723,7 @@ func TestAutopilotDispatchNotifiesSubscribersOnCreate(t *testing.T) {
 	issueID = uuidToString(run.IssueID)
 
 	var inboxCount int
-	var inboxType, inboxTitle string
+	var inboxType, inboxTitle, inboxBody string
 	if err := testPool.QueryRow(ctx, `
 		SELECT count(*) FROM inbox_item
 		WHERE issue_id = $1 AND recipient_id = $2 AND type = 'issue_subscribed'
@@ -735,9 +735,9 @@ func TestAutopilotDispatchNotifiesSubscribersOnCreate(t *testing.T) {
 	}
 
 	if err := testPool.QueryRow(ctx, `
-		SELECT type, title FROM inbox_item
+		SELECT type, title, body FROM inbox_item
 		WHERE issue_id = $1 AND recipient_id = $2 AND type = 'issue_subscribed'
-	`, issueID, testUserID).Scan(&inboxType, &inboxTitle); err != nil {
+	`, issueID, testUserID).Scan(&inboxType, &inboxTitle, &inboxBody); err != nil {
 		t.Fatalf("load inbox row: %v", err)
 	}
 	if inboxType != "issue_subscribed" {
@@ -745,6 +745,9 @@ func TestAutopilotDispatchNotifiesSubscribersOnCreate(t *testing.T) {
 	}
 	if inboxTitle != title {
 		t.Fatalf("inbox title = %q, want %q (issue title)", inboxTitle, title)
+	}
+	if inboxBody != "You are subscribed to this issue." {
+		t.Fatalf("inbox body = %q", inboxBody)
 	}
 }
 

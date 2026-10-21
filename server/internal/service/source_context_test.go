@@ -450,17 +450,20 @@ func TestFailTaskDoesNotRetryAfterSourceContextAttached(t *testing.T) {
 	if childCount != 0 {
 		t.Fatalf("retry children after source context attached = %d, want 0", childCount)
 	}
-	var inboxType string
+	var inboxType, inboxBody string
 	if err := pool.QueryRow(ctx, `
-		SELECT type FROM inbox_item
+		SELECT type, body FROM inbox_item
 		WHERE details->>'task_id' = $1
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, util.UUIDToString(parentID)).Scan(&inboxType); err != nil {
+	`, util.UUIDToString(parentID)).Scan(&inboxType, &inboxBody); err != nil {
 		t.Fatalf("load reconciled quick-create outcome: %v", err)
 	}
 	if inboxType != "quick_create_done" {
 		t.Fatalf("quick-create outcome after attached context = %q, want quick_create_done", inboxType)
+	}
+	if inboxBody != "Issue created from your quick-create request." {
+		t.Fatalf("quick-create body = %q", inboxBody)
 	}
 }
 

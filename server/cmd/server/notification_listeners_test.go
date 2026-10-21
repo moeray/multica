@@ -85,6 +85,40 @@ func newNotificationBus(t *testing.T, queries *db.Queries) *events.Bus {
 	return bus
 }
 
+func TestDefaultNotificationBody(t *testing.T) {
+	cases := []struct {
+		name      string
+		notifType string
+		body      string
+		details   string
+		want      string
+	}{
+		{"status transition", "status_changed", "", `{"from":"in_progress","to":"in_review"}`, "Status: In Progress → In Review"},
+		{"priority transition", "priority_changed", "", `{"from":"medium","to":"high"}`, "Priority: Medium → High"},
+		{"start date transition", "start_date_changed", "", `{"from":"","to":"2026-04-01"}`, "Start date: None → 2026-04-01"},
+		{"due date transition", "due_date_changed", "", `{"from":"2026-04-15","to":""}`, "Due date: 2026-04-15 → None"},
+		{"assignee changed", "assignee_changed", "", `{}`, "Assignee changed"},
+		{"assigned", "issue_assigned", "", `{}`, "Assigned to you"},
+		{"unassigned", "unassigned", "", `{}`, "Unassigned from you"},
+		{"reaction", "reaction_added", "", `{"emoji":"👍"}`, "Reaction: 👍"},
+		{"task failed", "task_failed", "", `{}`, "The agent run failed. Open the issue for details."},
+		{"mentioned", "mentioned", "", `{}`, "You were mentioned."},
+		{"new comment", "new_comment", "", `{}`, "New comment"},
+		{"issue subscribed", "issue_subscribed", "", `{}`, "You are subscribed to this issue."},
+		{"quick create", "quick_create_done", "", `{}`, "Issue created from your quick-create request."},
+		{"children done", "children_done", "", `{}`, "All child issues are done."},
+		{"existing body wins", "status_changed", "Custom body", `{"from":"todo","to":"done"}`, "Custom body"},
+		{"unknown type", "unknown", "", `{}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultNotificationBody(tc.notifType, tc.body, []byte(tc.details)); got != tc.want {
+				t.Fatalf("body = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNotification_IssueCreated_AssigneeNotified verifies that when an issue is
 // created with an assignee different from the creator, the assignee receives an
 // "issue_assigned" inbox notification and the creator receives nothing.
@@ -305,6 +339,9 @@ func TestNotification_StatusChanged(t *testing.T) {
 	}
 	if sub1Items[0].Type != "status_changed" {
 		t.Fatalf("expected type 'status_changed', got %q", sub1Items[0].Type)
+	}
+	if !sub1Items[0].Body.Valid || sub1Items[0].Body.String != "Status: Todo → In Progress" {
+		t.Fatalf("expected status body, got %+v", sub1Items[0].Body)
 	}
 	if sub1Items[0].Severity != "info" {
 		t.Fatalf("expected severity 'info', got %q", sub1Items[0].Severity)
@@ -735,6 +772,9 @@ func TestNotification_TaskFailed(t *testing.T) {
 	if creatorItems[0].Severity != "action_required" {
 		t.Fatalf("expected severity 'action_required', got %q", creatorItems[0].Severity)
 	}
+	if !creatorItems[0].Body.Valid || creatorItems[0].Body.String != "The agent run failed. Open the issue for details." {
+		t.Fatalf("expected task failure body, got %+v", creatorItems[0].Body)
+	}
 }
 
 // TestNotification_PriorityChanged verifies that all subscribers except the actor
@@ -794,6 +834,9 @@ func TestNotification_PriorityChanged(t *testing.T) {
 	}
 	if sub1Items[0].Severity != "info" {
 		t.Fatalf("expected severity 'info', got %q", sub1Items[0].Severity)
+	}
+	if !sub1Items[0].Body.Valid || sub1Items[0].Body.String != "Priority: Medium → High" {
+		t.Fatalf("expected priority body, got %+v", sub1Items[0].Body)
 	}
 	// Title is now just the issue title; details contain from/to
 	expectedTitle := "priority test issue"
@@ -861,6 +904,9 @@ func TestNotification_DueDateChanged(t *testing.T) {
 	if sub1Items[0].Severity != "info" {
 		t.Fatalf("expected severity 'info', got %q", sub1Items[0].Severity)
 	}
+	if !sub1Items[0].Body.Valid || sub1Items[0].Body.String != "Due date: None → 2026-04-15" {
+		t.Fatalf("expected due date body, got %+v", sub1Items[0].Body)
+	}
 }
 
 // TestNotification_StartDateChanged verifies that subscribers (except the actor)
@@ -920,6 +966,9 @@ func TestNotification_StartDateChanged(t *testing.T) {
 	}
 	if sub1Items[0].Severity != "info" {
 		t.Fatalf("expected severity 'info', got %q", sub1Items[0].Severity)
+	}
+	if !sub1Items[0].Body.Valid || sub1Items[0].Body.String != "Start date: None → 2026-04-01" {
+		t.Fatalf("expected start date body, got %+v", sub1Items[0].Body)
 	}
 }
 

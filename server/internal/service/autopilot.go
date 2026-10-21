@@ -908,7 +908,7 @@ func (s *AutopilotService) notifyAutopilotSubscribersOnCreate(
 			Severity:      "info",
 			IssueID:       issue.ID,
 			Title:         issue.Title,
-			Body:          pgtype.Text{},
+			Body:          pgtype.Text{String: "You are subscribed to this issue.", Valid: true},
 			ActorType:     pgtype.Text{String: "agent", Valid: true},
 			ActorID:       leaderID,
 			Details:       details,
