@@ -395,7 +395,7 @@ export function useCoordinatedUploads(
       if (file.size > MAX_FILE_SIZE) {
         // Never enters the coordinator, and never enters the draft either —
         // see the settle handler below for why a failure leaves no placeholder.
-        const reason = "File exceeds 100 MB limit";
+        const reason = "File exceeds 2 GB limit";
         if (pastedText !== undefined) {
           // A paste has no on-disk copy to re-attach from, so the text goes
           // back into the composer instead of being lost with the upload.

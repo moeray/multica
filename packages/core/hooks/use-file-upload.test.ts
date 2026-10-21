@@ -89,14 +89,14 @@ describe("useFileUpload — markdownLink picks the durable URL with three-layer 
     const huge = new File([new ArrayBuffer(1)], "big.bin", {
       type: "application/octet-stream",
     });
-    Object.defineProperty(huge, "size", { value: 200 * 1024 * 1024 });
+    Object.defineProperty(huge, "size", { value: 3 * 1024 * 1024 * 1024 });
 
     const { result } = renderHook(() => useFileUpload(api));
     await expect(
       act(async () => {
         await result.current.upload(huge);
       }),
-    ).rejects.toThrow(/100 MB/);
+    ).rejects.toThrow(/2 GB/);
     expect(api.uploadFile as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
   });
 });

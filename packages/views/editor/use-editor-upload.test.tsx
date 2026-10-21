@@ -56,16 +56,16 @@ describe("useEditorUpload", () => {
 
   it("surfaces the size-limit rejection by name too", async () => {
     const { result } = renderHook(() => useEditorUpload(), { wrapper });
-    // The 100 MB guard throws before any request goes out.
+    // The 2 GB guard throws before any request goes out.
     const huge = new File(["x"], "huge.mov", { type: "video/quicktime" });
-    Object.defineProperty(huge, "size", { value: 200 * 1024 * 1024 });
+    Object.defineProperty(huge, "size", { value: 3 * 1024 * 1024 * 1024 });
 
     await act(async () => {
       await result.current.uploadWithToast(huge);
     });
 
     expect(mockToastError).toHaveBeenCalledWith(
-      "Couldn't upload huge.mov: File exceeds 100 MB limit",
+      "Couldn't upload huge.mov: File exceeds 2 GB limit",
     );
   });
 
