@@ -96,7 +96,8 @@ WHERE id = sqlc.arg('id')
 -- `Config []byte`), so we pin the app_id arg to ::text to get AppID string.
 SELECT * FROM channel_installation
 WHERE channel_type = sqlc.arg('channel_type')
-  AND config ->> 'app_id' = sqlc.arg('app_id')::text;
+  AND config ->> 'app_id' = sqlc.arg('app_id')::text
+  AND purpose = 'agent';
 
 -- name: GetChannelInstallationOwnerByAppID :one
 -- Identifies the LIVE owner of a (channel_type, config->>'app_id') routing slot
@@ -198,9 +199,10 @@ WITH dead AS (
       AND (
             (ci.status = 'revoked'
                 AND NOT (ci.workspace_id = sqlc.arg('workspace_id')
+                         AND ci.purpose = 'agent'
                          AND ci.agent_id = sqlc.arg('agent_id')))
          OR NOT EXISTS (SELECT 1 FROM workspace w WHERE w.id = ci.workspace_id)
-         OR NOT EXISTS (SELECT 1 FROM agent a WHERE a.id = ci.agent_id)
+         OR (ci.purpose = 'agent' AND NOT EXISTS (SELECT 1 FROM agent a WHERE a.id = ci.agent_id))
       )
     RETURNING ci.id
 ),
@@ -253,6 +255,20 @@ cleared_binding_tokens AS (
 cleared_user_bindings AS (
     DELETE FROM channel_user_binding
     WHERE installation_id IN (SELECT id FROM dead)
+),
+cleared_inbox_destinations AS (
+    DELETE FROM inbox_lark_destination
+    WHERE installation_id IN (SELECT id FROM dead)
+),
+cancelled_inbox_deliveries AS (
+    UPDATE inbox_lark_delivery
+    SET status = 'cancelled',
+        cancelled_reason = 'target_removed',
+        claim_token = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+    WHERE installation_id IN (SELECT id FROM dead)
+      AND status IN ('pending', 'retry')
 ),
 cleared_inbound_dedup AS (
     DELETE FROM channel_inbound_message_dedup
@@ -336,6 +352,21 @@ cleared_user_bindings AS (
     DELETE FROM channel_user_binding AS user_binding
     WHERE user_binding.installation_id = @installation_id
     RETURNING user_binding.id
+),
+cleared_inbox_destinations AS (
+    DELETE FROM inbox_lark_destination AS destination
+    WHERE destination.installation_id = @installation_id
+    RETURNING destination.id
+),
+cancelled_inbox_deliveries AS (
+    UPDATE inbox_lark_delivery
+    SET status = 'cancelled',
+        cancelled_reason = 'target_removed',
+        claim_token = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+    WHERE installation_id = @installation_id
+      AND status IN ('pending', 'retry')
 )
 SELECT
     (SELECT count(*) FROM cleared_user_bindings)::bigint AS user_bindings,
@@ -422,6 +453,7 @@ DELETE FROM channel_installation WHERE id IN (SELECT id FROM doomed);
 SELECT * FROM channel_installation
 WHERE workspace_id = sqlc.arg('workspace_id')
   AND channel_type = sqlc.arg('channel_type')
+  AND purpose = 'agent'
 ORDER BY created_at ASC;
 
 -- name: ListActiveChannelInstallations :many
@@ -442,6 +474,7 @@ JOIN workspace w ON w.id = ci.workspace_id
 JOIN agent a ON a.id = ci.agent_id
 WHERE ci.status = 'active'
   AND ci.channel_type = sqlc.arg('channel_type')
+  AND ci.purpose = 'agent'
 ORDER BY ci.created_at ASC;
 
 -- name: ListAllActiveChannelInstallations :many
@@ -458,6 +491,7 @@ SELECT ci.* FROM channel_installation ci
 JOIN workspace w ON w.id = ci.workspace_id
 JOIN agent a ON a.id = ci.agent_id
 WHERE ci.status = 'active'
+  AND ci.purpose = 'agent'
 ORDER BY ci.created_at ASC;
 
 -- name: SetChannelInstallationStatus :exec

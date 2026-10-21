@@ -142,6 +142,15 @@ func (h *Handler) revokeAndRemoveMember(ctx context.Context, workspaceID, userID
 	}); err != nil {
 		return empty, err
 	}
+	// The explicit inbox destination is keyed by member, not by binding, so it
+	// needs its own cleanup in the same transaction. Disable it and cancel
+	// queued sends before the member row disappears.
+	if err := qtx.RevokeInboxLarkNotificationsForMember(ctx, db.RevokeInboxLarkNotificationsForMemberParams{
+		WorkspaceID: workspaceID,
+		MemberID:    userID,
+	}); err != nil {
+		return empty, err
+	}
 
 	// agent_invocation_target carries member-target grants with NO database FK
 	// (MUL-3963 keeps the new table FK-free, matching the MUL-3515 channel

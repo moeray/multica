@@ -66,6 +66,8 @@ import {
   PluginPreviewSchema,
   EMPTY_PLUGIN_INSTALLATION_LIST,
   EMPTY_PLUGIN_PREVIEW,
+  LarkInboxSettingsResponseSchema,
+  EMPTY_LARK_INBOX_SETTINGS,
 } from "./schemas";
 import { IssueViewSchema, IssueViewListSchema } from "./schemas";
 import {
@@ -2353,5 +2355,40 @@ describe("AgentActivityBucketListSchema duration", () => {
     expect(parsed[0]?.task_count).toBe(201);
     expect(parsed[0]?.duration_ms).toBeUndefined();
     expect(parsed[0]?.duration_count).toBeUndefined();
+  });
+});
+
+describe("LarkInboxSettingsResponseSchema", () => {
+  it("keeps a valid explicit destination and degrades malformed collections", () => {
+    const parsed = LarkInboxSettingsResponseSchema.parse({
+      configured: true,
+      install_supported: true,
+      destination: {
+        id: "destination-1",
+        installation_id: "installation-1",
+        channel_user_id: "ou_1",
+        status: "active",
+        kind: "agent",
+        bot_open_id: "bot_1",
+        region: "feishu",
+        created_at: "2026-10-21T00:00:00Z",
+        updated_at: "2026-10-21T00:00:00Z",
+      },
+      targets: [{ installation_id: "installation-1", bot_open_id: "bot_1" }],
+      deliveries: "not-an-array",
+    });
+    expect(parsed.destination?.status).toBe("active");
+    expect(parsed.targets).toHaveLength(1);
+    expect(parsed.deliveries).toEqual([]);
+  });
+
+  it("falls back to the no-destination shape when the response is unparseable", () => {
+    const parsed = parseWithFallback(
+      { configured: "yes", targets: "nope" },
+      LarkInboxSettingsResponseSchema,
+      EMPTY_LARK_INBOX_SETTINGS,
+      { endpoint: "GET /api/workspaces/:id/lark/inbox" },
+    );
+    expect(parsed).toEqual(EMPTY_LARK_INBOX_SETTINGS);
   });
 });

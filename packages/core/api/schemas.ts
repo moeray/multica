@@ -43,6 +43,8 @@ import type {
   ListDingTalkInstallationsResponse,
   ListDingTalkGroupsResponse,
   RedeemDingTalkBindingTokenResponse,
+  LarkInboxSettingsResponse,
+  LarkInboxTestResponse,
   WecomInstallation,
   ListWecomInstallationsResponse,
   RedeemWecomBindingTokenResponse,
@@ -3405,6 +3407,75 @@ export const EMPTY_REDEEM_DINGTALK_BINDING_TOKEN_RESPONSE: RedeemDingTalkBinding
 // state rather than a Connect dialog whose submit is guaranteed to fail), and a
 // missing `status` defaults to "revoked" rather than "active" so a broken read
 // never shows a bot as connected when it may not be.
+// Explicit Lark inbox notification destination. The inbox dialog is a primary
+// UI surface, so malformed rows degrade to an empty target/delivery list
+// rather than taking the dialog down. `.loose()` keeps newer backend fields
+// forward compatible.
+export const InboxLarkDestinationSchema = z.object({
+  id: z.string(),
+  installation_id: z.string().default(""),
+  channel_user_id: z.string().default(""),
+  status: z.string().default("unavailable"),
+  kind: z.string().default("agent"),
+  agent_id: z.string().optional(),
+  bot_open_id: z.string().default(""),
+  region: z.string().optional(),
+  last_test_status: z.string().optional(),
+  last_test_error: z.string().optional(),
+  last_test_at: z.string().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const InboxLarkTargetSchema = z.object({
+  installation_id: z.string(),
+  kind: z.string().default("agent"),
+  agent_id: z.string().optional(),
+  channel_user_id: z.string().default(""),
+  bot_open_id: z.string().default(""),
+  region: z.string().optional(),
+}).loose();
+
+export const InboxLarkDeliverySchema = z.object({
+  id: z.string(),
+  inbox_item_id: z.string().default(""),
+  installation_id: z.string().default(""),
+  channel_user_id: z.string().default(""),
+  status: z.string().default("failed"),
+  attempts: z.number().int().nonnegative().default(0),
+  next_attempt_at: z.string().optional(),
+  last_error: z.string().optional(),
+  cancelled_reason: z.string().optional(),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+  delivered_at: z.string().optional(),
+}).loose();
+
+export const LarkInboxSettingsResponseSchema = z.object({
+  configured: z.boolean().default(false),
+  install_supported: z.boolean().optional(),
+  destination: InboxLarkDestinationSchema.nullish().transform((value) => value ?? null),
+  targets: z.array(InboxLarkTargetSchema).catch([]).default([]),
+  deliveries: z.array(InboxLarkDeliverySchema).catch([]).default([]),
+}).loose();
+
+export const EMPTY_LARK_INBOX_SETTINGS: LarkInboxSettingsResponse = {
+  configured: false,
+  install_supported: false,
+  destination: null,
+  targets: [],
+  deliveries: [],
+};
+
+export const LarkInboxTestResponseSchema = z.object({
+  ok: z.boolean().default(false),
+  error: z.string().optional(),
+}).loose();
+
+export const EMPTY_LARK_INBOX_TEST_RESPONSE: LarkInboxTestResponse = {
+  ok: false,
+};
+
 export const WecomInstallationSchema = z.object({
   id: z.string(),
   workspace_id: z.string().default(""),

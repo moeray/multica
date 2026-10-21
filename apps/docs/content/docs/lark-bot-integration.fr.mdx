@@ -62,6 +62,21 @@ Ouvrez **Paramètres → Messagerie → Lark** pour voir les bots connectés dan
 
 Après la déconnexion, le bot ne reçoit plus de nouveaux messages. Les conversations et enregistrements d'audit existants ne sont pas supprimés.
 
+## Notifications de la boîte de réception
+
+Les notifications utilisent une destination que chaque membre choisit explicitement. Elle ne dépend pas de l'agent, de l'automatisation ou du membre à l'origine de l'élément.
+
+1. Ouvrez le menu de la page **Boîte de réception** et choisissez **Notifications Feishu**.
+2. Sélectionnez un bot d'agent déjà lié dans Feishu, ou installez un bot dédié. Un bot dédié n'est rattaché à aucun agent.
+3. Choisissez la destination et enregistrez. Utilisez **Envoyer un test** pour vérifier que le bot peut vous joindre.
+
+Toutes les notifications passent par cette destination. Sans destination active, les éléments restent dans Multica et rien n'est envoyé ; Multica ne se rabat pas sur le dernier bot lié.
+
+Chaque élément crée un enregistrement d'envoi durable. Les échecs sont réessayés avec un backoff borné et peuvent être relancés manuellement ; les envois en attente reprennent après un redémarrage et plusieurs répliques ne consomment pas le même enregistrement. Un échec ne supprime jamais l'élément de la boîte de réception et ne bloque pas la tâche ou le ticket qui l'a créé.
+
+Remplacer ou dissocier une destination annule les envois en attente vers l'ancienne cible. Un envoi déjà en cours peut encore arriver, et un délai après acceptation par Feishu peut produire un doublon : les enregistrements exposent ces états, mais Multica ne garantit pas un exactly-once de bout en bout.
+
+La migration ne déduit aucune destination des liaisons Feishu existantes : chaque membre doit faire un choix explicite. Pour revenir en arrière, désactivez votre destination ; la boîte de réception Multica reste disponible. Le rollback de base de données supprime les tables de destination et de livraison ainsi que les bots dédiés.
 ## Configuration en auto-hébergement
 
 Multica Cloud ne nécessite aucune configuration supplémentaire. Un déploiement auto-hébergé doit d'abord définir une clé servant à chiffrer les identifiants du bot :

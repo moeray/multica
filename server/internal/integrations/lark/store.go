@@ -43,6 +43,7 @@ type Installation struct {
 	ID                 pgtype.UUID
 	WorkspaceID        pgtype.UUID
 	AgentID            pgtype.UUID
+	Purpose            string
 	AppID              string
 	AppSecretEncrypted []byte
 	TenantKey          pgtype.Text
@@ -162,6 +163,7 @@ func installationFromRow(row db.ChannelInstallation) (Installation, error) {
 		ID:                 row.ID,
 		WorkspaceID:        row.WorkspaceID,
 		AgentID:            row.AgentID,
+		Purpose:            purposeOrDefault(row.Purpose),
 		AppID:              cfg.AppID,
 		AppSecretEncrypted: secret,
 		TenantKey:          textOrNull(cfg.TenantKey),
@@ -176,6 +178,21 @@ func installationFromRow(row db.ChannelInstallation) (Installation, error) {
 		BotUnionID:         textOrNull(cfg.BotUnionID),
 		Region:             cfg.Region,
 	}, nil
+}
+
+// InstallationPurpose distinguishes an agent conversation bot from a bot that
+// only carries inbox notifications. Every pre-063 row predates the column and
+// resolves to the agent purpose.
+const (
+	InstallationPurposeAgent = "agent"
+	InstallationPurposeInbox = "inbox"
+)
+
+func purposeOrDefault(purpose string) string {
+	if purpose == InstallationPurposeInbox {
+		return InstallationPurposeInbox
+	}
+	return InstallationPurposeAgent
 }
 
 // encodeInstallConfig builds the channel_installation.config JSONB from the

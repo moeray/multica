@@ -401,6 +401,7 @@ type ChannelInstallation struct {
 	InstalledAt      pgtype.Timestamptz `json:"installed_at"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	Purpose          string             `json:"purpose"`
 }
 
 type ChannelMediaPendingObject struct {
@@ -803,6 +804,41 @@ type InboxItem struct {
 	ActorType     pgtype.Text        `json:"actor_type"`
 	ActorID       pgtype.UUID        `json:"actor_id"`
 	Details       []byte             `json:"details"`
+}
+
+type InboxLarkDelivery struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	InboxItemID       pgtype.UUID        `json:"inbox_item_id"`
+	RecipientMemberID pgtype.UUID        `json:"recipient_member_id"`
+	InstallationID    pgtype.UUID        `json:"installation_id"`
+	ChannelUserID     string             `json:"channel_user_id"`
+	IdempotencyKey    string             `json:"idempotency_key"`
+	Payload           []byte             `json:"payload"`
+	Status            string             `json:"status"`
+	Attempts          int32              `json:"attempts"`
+	NextAttemptAt     pgtype.Timestamptz `json:"next_attempt_at"`
+	ClaimToken        pgtype.UUID        `json:"claim_token"`
+	ClaimExpiresAt    pgtype.Timestamptz `json:"claim_expires_at"`
+	LastError         pgtype.Text        `json:"last_error"`
+	CancelledReason   pgtype.Text        `json:"cancelled_reason"`
+	DeliveredAt       pgtype.Timestamptz `json:"delivered_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type InboxLarkDestination struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	MemberID       pgtype.UUID        `json:"member_id"`
+	InstallationID pgtype.UUID        `json:"installation_id"`
+	ChannelUserID  string             `json:"channel_user_id"`
+	Status         string             `json:"status"`
+	LastTestStatus pgtype.Text        `json:"last_test_status"`
+	LastTestError  pgtype.Text        `json:"last_test_error"`
+	LastTestAt     pgtype.Timestamptz `json:"last_test_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type InstanceTelemetryState struct {

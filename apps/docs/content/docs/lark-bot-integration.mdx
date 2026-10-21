@@ -64,7 +64,19 @@ After disconnecting, the Bot stops receiving new messages. Existing conversation
 
 ## Inbox notifications
 
-After a member binds the Bot, new items in their Multica inbox are also delivered to the Bot's direct message with that member. Only an active binding receives pushes; agents, unbound members, and revoked bindings are skipped. Each notification carries the title, a short excerpt, and a link back to the Multica inbox. A failed push is logged and never affects the inbox item itself.
+Inbox notifications use a destination each member chooses explicitly. The destination is a Feishu bot plus that member's Lark identity, and it does not change when the item comes from a different agent, an autopilot, or another member.
+
+1. Open the **Inbox** page menu and choose **Feishu notifications**.
+2. Pick an agent Bot you have already bound in Feishu, or install a dedicated inbox Bot. A dedicated Bot is not attached to an agent.
+3. Select a destination and save. Use **Send test** to confirm the Bot can reach you.
+
+Notifications from every source now go through that one destination. If no destination is configured, or it is disabled, items stay in the Multica inbox and nothing is sent. Multica does not fall back to the most recently bound Bot.
+
+Each inbox item creates a durable delivery record. Failed sends retry with bounded backoff and can be retried manually from the same dialog; pending work resumes after a restart, and multiple server replicas cannot consume the same record twice. Delivery failures never remove the inbox item or block the task or issue request that created it.
+
+Replacing or unbinding a destination cancels queued deliveries for the old target. A send that was already in flight when the target changed may still arrive, and a timeout after Feishu accepted a message can produce a duplicate: delivery evidence exposes those states, but Multica does not promise end-to-end exactly-once delivery.
+
+Existing Feishu bindings are not used to infer a destination during migration. Every member must make an explicit choice the first time they enable external inbox notifications. To roll back, disable the destination; the in-app inbox continues to work. The database rollback drops the destination and delivery outbox tables and the dedicated Bot rows.
 
 ## Self-hosting setup
 
@@ -89,6 +101,8 @@ Restart the API server, then connect the Bot from the agent's **Integrations** p
 - **No bind button**: confirm the current account is the agent's owner or a workspace owner or admin, and check that the self-hosting key is configured.
 - **QR code expired**: close the dialog and start the connection again.
 - **The Bot asks for account binding**: open the binding link and sign in with the Multica account for that workspace.
+- **Feishu inbox notifications never arrive**: open the Inbox page menu, confirm the destination is active, and use **Send test**. The same dialog lists recent delivery attempts and their last error. With no destination, items intentionally stay in Multica only.
+- **A notification went to the wrong bot**: replace the destination explicitly. Queued deliveries for the old target are cancelled; in-flight requests already accepted by Feishu may still arrive.
 - **The Bot doesn't run**: check whether the agent is archived and whether the [runtime](/daemon-runtimes) it uses is online.
 - **The Bot never replies at all**: the app must push events over a long connection — Multica has no webhook endpoint. In the Feishu/Lark developer console, open **Events & Callbacks → Event Configuration** and confirm that the subscription method is the long connection rather than a request URL, that `im.message.receive_v1` is subscribed, and that the app version carrying that configuration is published (and approved, where the tenant reviews releases). An app set to a request URL still binds, still shows Connected, and silently receives nothing.
 

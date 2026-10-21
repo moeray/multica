@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ApiClient, ApiError } from "./client";
 import { parseWithFallback } from "./schema";
+import { EMPTY_LARK_INBOX_SETTINGS } from "./schemas";
 
 // Helper: stub fetch with a single JSON response. Status defaults to 200.
 function stubFetchJson(body: unknown, status = 200) {
@@ -24,6 +25,16 @@ afterEach(() => {
 // app in past incidents. The contract is: a malformed response degrades to
 // an empty/safe shape, never throws into React.
 describe("ApiClient schema fallback", () => {
+  describe("Lark inbox settings", () => {
+    it("degrades a malformed destination response to the no-destination shape", async () => {
+      stubFetchJson({ configured: "yes", destination: { id: 1 }, targets: "nope" });
+      const client = new ApiClient("https://api.example.test");
+      await expect(client.getLarkInboxSettings("ws-1")).resolves.toEqual(
+        EMPTY_LARK_INBOX_SETTINGS,
+      );
+    });
+  });
+
   describe("GitHub repository import", () => {
     it("falls back safely when installation or repository responses are malformed", async () => {
       stubFetchJson({ installations: "not-an-array", configured: true });

@@ -65,6 +65,7 @@ import {
   ChevronLeft,
   ListChecks,
   ArrowLeft,
+  BellRing,
 } from "lucide-react";
 import type { InboxItem } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
@@ -98,6 +99,7 @@ import {
   resolveDetailItem,
 } from "./inbox-display";
 import { AutopilotQuotaNotice } from "./autopilot-quota-notice";
+import { InboxLarkNotificationDialog } from "./inbox-lark-notification-dialog";
 import { useT } from "../../i18n";
 import { useIssueLimitUpgradePrompt } from "../../modals/use-issue-limit-upgrade-prompt";
 
@@ -119,6 +121,7 @@ export function InboxPage() {
 
   const [selectedKey, setSelectedKeyState] = useState(() => urlIssue);
   const [view, setViewState] = useState<InboxView>(() => urlView);
+  const [notificationSettingsOpen, setNotificationSettingsOpen] = useState(false);
 
   // Sync from URL when searchParams change (e.g. navigation)
   useEffect(() => {
@@ -497,6 +500,7 @@ export function InboxPage() {
   // -- Shared sub-components --------------------------------------------------
 
   const listHeader = (
+    <>
     <PageHeader>
       <div className="flex flex-1 items-center gap-2">
         <h1 className="text-body font-semibold">{t(($) => $.page.title)}</h1>
@@ -550,10 +554,20 @@ export function InboxPage() {
             <ListChecks className="h-4 w-4" />
             {t(($) => $.menu.archive_completed)}
           </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => setNotificationSettingsOpen(true)}>
+            <BellRing className="h-4 w-4" />
+            {t(($) => $.notifications.menu)}
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       )}
     </PageHeader>
+    <InboxLarkNotificationDialog
+      open={notificationSettingsOpen}
+      onOpenChange={setNotificationSettingsOpen}
+    />
+    </>
   );
 
   // Back out of the archive. Sits inside the list panel rather than replacing

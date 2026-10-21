@@ -74,3 +74,59 @@ export interface RedeemLarkBindingTokenResponse {
   installation_id: string;
   lark_open_id: string;
 }
+
+/** Explicit inbox notification destination for one workspace member. */
+export interface InboxLarkDestination {
+  id: string;
+  installation_id: string;
+  channel_user_id: string;
+  /** Effective state: active, disabled, or unavailable (revoked bot). */
+  status: "active" | "disabled" | "unavailable" | string;
+  kind: "agent" | "inbox" | string;
+  agent_id?: string;
+  bot_open_id: string;
+  region?: "feishu" | "lark" | string;
+  last_test_status?: "success" | "failed" | string;
+  last_test_error?: string;
+  last_test_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A bot the current member may explicitly choose as their inbox outlet. */
+export interface InboxLarkTarget {
+  installation_id: string;
+  kind: "agent" | "inbox" | string;
+  agent_id?: string;
+  channel_user_id: string;
+  bot_open_id: string;
+  region?: "feishu" | "lark" | string;
+}
+
+export interface InboxLarkDelivery {
+  id: string;
+  inbox_item_id: string;
+  installation_id: string;
+  channel_user_id: string;
+  status: "pending" | "sending" | "retry" | "delivered" | "failed" | "cancelled" | string;
+  attempts: number;
+  next_attempt_at?: string;
+  last_error?: string;
+  cancelled_reason?: string;
+  created_at: string;
+  updated_at: string;
+  delivered_at?: string;
+}
+
+export interface LarkInboxSettingsResponse {
+  configured: boolean;
+  install_supported?: boolean;
+  destination: InboxLarkDestination | null;
+  targets: InboxLarkTarget[];
+  deliveries: InboxLarkDelivery[];
+}
+
+export interface LarkInboxTestResponse {
+  ok: boolean;
+  error?: string;
+}

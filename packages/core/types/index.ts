@@ -240,6 +240,11 @@ export type {
   BeginLarkInstallResponse,
   LarkInstallStatusResponse,
   RedeemLarkBindingTokenResponse,
+  InboxLarkDestination,
+  InboxLarkTarget,
+  InboxLarkDelivery,
+  LarkInboxSettingsResponse,
+  LarkInboxTestResponse,
 } from "./lark";
 export type {
   ComposioToolkit,
