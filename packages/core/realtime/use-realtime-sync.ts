@@ -922,7 +922,10 @@ export function useRealtimeSync(
       },
       lark_installation: () => {
         const wsId = getCurrentWsId();
-        if (wsId) qc.invalidateQueries({ queryKey: larkKeys.installations(wsId) });
+        if (wsId) {
+          qc.invalidateQueries({ queryKey: larkKeys.installations(wsId) });
+          qc.invalidateQueries({ queryKey: larkKeys.inboxSettings(wsId) });
+        }
       },
       slack_installation: () => {
         const wsId = getCurrentWsId();

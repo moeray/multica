@@ -1025,6 +1025,75 @@ VALUES ($1, $2, $3, 'feishu', $4)
 	}
 }
 
+// TestDeleteMember_DisablesInboxLarkDestination proves membership remains the
+// access boundary for the explicit inbox outlet: removing a member disables
+// their destination and cancels queued sends in the same transaction, while the
+// destination row stays for audit until the workspace itself is deleted.
+func TestDeleteMember_DisablesInboxLarkDestination(t *testing.T) {
+	fx := setupRevocationFixture(t, "handler-tests-revoke-inbox-lark", "daemon-revoke-inbox-lark")
+
+	const appID = "cli_revoke_inbox_lark"
+	const openID = "ou_revoke_inbox_lark_removed"
+	const idempotencyKey = "inbox-test-remove-member"
+
+	clean := func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM inbox_lark_delivery WHERE idempotency_key = $1`, idempotencyKey)
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM inbox_lark_destination WHERE channel_user_id = $1`, openID)
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM channel_user_binding WHERE channel_user_id = $1`, openID)
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM channel_installation WHERE channel_type = 'feishu' AND config->>'app_id' = $1`, appID)
+	}
+	clean()
+	t.Cleanup(clean)
+
+	var installID string
+	dbfx.QueryRow(t, `
+INSERT INTO channel_installation (workspace_id, agent_id, channel_type, config, installer_user_id)
+VALUES ($1, $2, 'feishu', jsonb_build_object('app_id', $3::text), $4)
+RETURNING id
+`, fx.WorkspaceID, fx.AgentID, appID, testUserID).Scan(&installID)
+
+	dbfx.Exec(t, `
+INSERT INTO channel_user_binding (workspace_id, multica_user_id, installation_id, channel_type, channel_user_id)
+VALUES ($1, $2, $3, 'feishu', $4)
+`, fx.WorkspaceID, fx.TargetUserID, installID, openID)
+
+	dbfx.Exec(t, `
+INSERT INTO inbox_lark_destination (workspace_id, member_id, installation_id, channel_user_id, status)
+VALUES ($1, $2, $3, $4, 'active')
+`, fx.WorkspaceID, fx.TargetUserID, installID, openID)
+
+	dbfx.Exec(t, `
+INSERT INTO inbox_lark_delivery (
+    workspace_id, inbox_item_id, recipient_member_id, installation_id,
+    channel_user_id, idempotency_key, payload, status
+) VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, '{}'::jsonb, 'pending')
+`, fx.WorkspaceID, fx.TargetUserID, installID, openID, idempotencyKey)
+
+	req := newRequest("DELETE", "/api/workspaces/"+fx.WorkspaceID+"/members/"+fx.MemberID, nil)
+	req.Header.Set("X-Workspace-ID", fx.WorkspaceID)
+	req = withURLParams(req, "id", fx.WorkspaceID, "memberId", fx.MemberID)
+	testutil.Call(t, testHandler.DeleteMember, req).Want(http.StatusNoContent)
+
+	var destinationStatus string
+	dbfx.QueryRow(t,
+		`SELECT status FROM inbox_lark_destination WHERE channel_user_id = $1`, openID).Scan(&destinationStatus)
+	if destinationStatus != "disabled" {
+		t.Fatalf("destination status = %q, want disabled", destinationStatus)
+	}
+
+	var deliveryStatus, cancelReason string
+	dbfx.QueryRow(t,
+		`SELECT status, cancelled_reason FROM inbox_lark_delivery WHERE idempotency_key = $1`,
+		idempotencyKey).Scan(&deliveryStatus, &cancelReason)
+	if deliveryStatus != "cancelled" || cancelReason != "member_removed" {
+		t.Fatalf("delivery = (%q, %q), want (cancelled, member_removed)", deliveryStatus, cancelReason)
+	}
+}
+
 // TestDeleteMember_PrunesAutopilotSubscribers verifies the application-layer
 // cleanup for the FK-free autopilot_subscriber table. DeleteMember and
 // LeaveWorkspace both use revokeAndRemoveMember, so this pins their shared

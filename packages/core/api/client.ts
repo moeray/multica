@@ -190,6 +190,8 @@ import type {
   BeginLarkInstallResponse,
   LarkInstallStatusResponse,
   RedeemLarkBindingTokenResponse,
+  LarkInboxSettingsResponse,
+  LarkInboxTestResponse,
   ComposioToolkit,
   ComposioConnection,
   ComposioConnectInitResponse,
@@ -378,6 +380,10 @@ import {
   EMPTY_LIST_DINGTALK_INSTALLATIONS_RESPONSE,
   EMPTY_LIST_DINGTALK_GROUPS_RESPONSE,
   EMPTY_REDEEM_DINGTALK_BINDING_TOKEN_RESPONSE,
+  LarkInboxSettingsResponseSchema,
+  EMPTY_LARK_INBOX_SETTINGS,
+  LarkInboxTestResponseSchema,
+  EMPTY_LARK_INBOX_TEST_RESPONSE,
   WecomInstallationSchema,
   ListWecomInstallationsResponseSchema,
   RedeemWecomBindingTokenResponseSchema,
@@ -5080,6 +5086,57 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ token }),
     });
+  }
+
+  async getLarkInboxSettings(workspaceId: string): Promise<LarkInboxSettingsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/lark/inbox`);
+    return parseWithFallback(raw, LarkInboxSettingsResponseSchema, EMPTY_LARK_INBOX_SETTINGS, {
+      endpoint: "GET /api/workspaces/:id/lark/inbox",
+    });
+  }
+
+  async setLarkInboxDestination(
+    workspaceId: string,
+    installationId: string,
+  ): Promise<LarkInboxSettingsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/lark/inbox`, {
+      method: "PUT",
+      body: JSON.stringify({ installation_id: installationId }),
+    });
+    return parseWithFallback(raw, LarkInboxSettingsResponseSchema, EMPTY_LARK_INBOX_SETTINGS, {
+      endpoint: "PUT /api/workspaces/:id/lark/inbox",
+    });
+  }
+
+  async disableLarkInboxDestination(workspaceId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/lark/inbox`, { method: "DELETE" });
+  }
+
+  async testLarkInboxDestination(workspaceId: string): Promise<LarkInboxTestResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/lark/inbox/test`, {
+      method: "POST",
+    });
+    return parseWithFallback(raw, LarkInboxTestResponseSchema, EMPTY_LARK_INBOX_TEST_RESPONSE, {
+      endpoint: "POST /api/workspaces/:id/lark/inbox/test",
+    });
+  }
+
+  async retryLarkInboxDelivery(workspaceId: string, deliveryId: string): Promise<void> {
+    await this.fetch(
+      `/api/workspaces/${workspaceId}/lark/inbox/deliveries/${deliveryId}/retry`,
+      { method: "POST" },
+    );
+  }
+
+  async beginLarkInboxInstall(
+    workspaceId: string,
+    region: "feishu" | "lark",
+  ): Promise<BeginLarkInstallResponse> {
+    const search = new URLSearchParams({ region });
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/lark/inbox/install/begin?${search.toString()}`,
+      { method: "POST" },
+    );
   }
 
   // Composio integration (MUL-3720). All routes are user-scoped (a connection

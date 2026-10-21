@@ -7,11 +7,19 @@ import { api } from "../api";
 export const larkKeys = {
   all: (wsId: string) => ["lark", wsId] as const,
   installations: (wsId: string) => [...larkKeys.all(wsId), "installations"] as const,
+  inboxSettings: (wsId: string) => [...larkKeys.all(wsId), "inbox-settings"] as const,
 };
 
 export const larkInstallationsOptions = (wsId: string) =>
   queryOptions({
     queryKey: larkKeys.installations(wsId),
     queryFn: () => api.listLarkInstallations(wsId),
+    enabled: !!wsId,
+  });
+
+export const larkInboxSettingsOptions = (wsId: string) =>
+  queryOptions({
+    queryKey: larkKeys.inboxSettings(wsId),
+    queryFn: () => api.getLarkInboxSettings(wsId),
     enabled: !!wsId,
   });

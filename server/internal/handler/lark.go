@@ -155,16 +155,26 @@ func (h *Handler) RevokeLarkInstallation(w http.ResponseWriter, r *http.Request)
 	// the disconnect entry point (see ListByWorkspace vs the orphan-
 	// filtered active list). No FK/cascade: the missing agent is handled
 	// in the application layer.
-	agent, agentErr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
-		ID:          inst.AgentID,
-		WorkspaceID: wsUUID,
-	})
-	if agentErr != nil {
-		if _, ok := h.requireWorkspaceRole(w, r, uuidToString(wsUUID), "lark installation not found", "owner", "admin"); !ok {
+	if inst.Purpose == lark.InstallationPurposeInbox {
+		// A dedicated inbox bot belongs to the member who installed it.
+		// Workspace owners/admins keep the orphan-cleanup path.
+		if uuidToString(inst.InstallerUserID) != userID {
+			if _, ok := h.requireWorkspaceRole(w, r, uuidToString(wsUUID), "lark installation not found", "owner", "admin"); !ok {
+				return
+			}
+		}
+	} else {
+		agent, agentErr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+			ID:          inst.AgentID,
+			WorkspaceID: wsUUID,
+		})
+		if agentErr != nil {
+			if _, ok := h.requireWorkspaceRole(w, r, uuidToString(wsUUID), "lark installation not found", "owner", "admin"); !ok {
+				return
+			}
+		} else if !h.canManageAgent(w, r, agent) {
 			return
 		}
-	} else if !h.canManageAgent(w, r, agent) {
-		return
 	}
 	if err := h.LarkInstallations.Revoke(r.Context(), instUUID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to revoke installation")

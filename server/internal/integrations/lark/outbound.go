@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -151,13 +150,20 @@ type PatcherQueries interface {
 	GetChatSession(ctx context.Context, id pgtype.UUID) (db.ChatSession, error)
 	GetAgent(ctx context.Context, id pgtype.UUID) (db.Agent, error)
 	GetLarkInstallation(ctx context.Context, id pgtype.UUID) (Installation, error)
-	FindChannelBindingForMember(ctx context.Context, arg db.FindChannelBindingForMemberParams) (db.ChannelUserBinding, error)
-	FindChannelBindingForMemberOnAgentInstallation(ctx context.Context, arg db.FindChannelBindingForMemberOnAgentInstallationParams) (db.ChannelUserBinding, error)
 	GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error)
 	GetLarkChatSessionBindingBySession(ctx context.Context, chatSessionID pgtype.UUID) (ChatSessionBinding, error)
 	GetLarkOutboundCardByTask(ctx context.Context, taskID pgtype.UUID) (OutboundCardMessage, error)
 	CreateLarkOutboundCardMessage(ctx context.Context, arg CreateOutboundCardMessageParams) (OutboundCardMessage, error)
 	UpdateLarkOutboundCardStatus(ctx context.Context, arg UpdateOutboundCardStatusParams) error
+	GetInboxLarkDestination(ctx context.Context, workspaceID, memberID pgtype.UUID) (db.InboxLarkDestination, error)
+	FindChannelBindingForMemberOnInstallation(ctx context.Context, workspaceID, memberID, installationID pgtype.UUID) (db.ChannelUserBinding, error)
+	CreateInboxLarkDelivery(ctx context.Context, arg db.CreateInboxLarkDeliveryParams) (db.InboxLarkDelivery, error)
+	ClaimNextInboxLarkDelivery(ctx context.Context, claimToken pgtype.UUID) (db.InboxLarkDelivery, error)
+	MarkInboxLarkDeliveryDelivered(ctx context.Context, id, claimToken pgtype.UUID) (int64, error)
+	RetryInboxLarkDelivery(ctx context.Context, id, claimToken pgtype.UUID, nextAttemptAt pgtype.Timestamptz, lastError string) (int64, error)
+	FailInboxLarkDelivery(ctx context.Context, id, claimToken pgtype.UUID, lastError string) (int64, error)
+	CancelInboxLarkDelivery(ctx context.Context, id, claimToken pgtype.UUID, reason string) (int64, error)
+	RecoverStaleInboxLarkDeliveries(ctx context.Context) (int64, error)
 }
 
 // CredentialsResolver decrypts an installation's app_secret for the
@@ -224,10 +230,7 @@ type Patcher struct {
 	client          APIClient
 	typingIndicator *TypingIndicatorManager
 	cfg             PatcherConfig
-	inboxSeen       *inboxDedupe
-	inboxQueue      chan inboxJob
-	inboxOnce       sync.Once
-	inboxPending    sync.WaitGroup
+	inboxWake       chan struct{}
 }
 
 // NewPatcher constructs a Patcher bound to its dependencies. The
@@ -239,8 +242,7 @@ func NewPatcher(queries PatcherQueries, credentials CredentialsResolver, client 
 		credentials: credentials,
 		client:      client,
 		cfg:         cfg,
-		inboxSeen:   newInboxDedupe(),
-		inboxQueue:  make(chan inboxJob, inboxQueueSize),
+		inboxWake:   make(chan struct{}, 1),
 	}
 }
 

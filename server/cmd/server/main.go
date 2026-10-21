@@ -796,6 +796,9 @@ func main() {
 	if h.LarkTyping != nil {
 		go h.LarkTyping.Run(sweepCtx)
 	}
+	if h.LarkPatcher != nil {
+		go h.LarkPatcher.RunInboxDeliveryWorker(sweepCtx)
+	}
 
 	// Media intent-ledger reconciler (PR #5580): settles uploaded-but-unbound
 	// channel media objects. An independent worker so object-storage latency

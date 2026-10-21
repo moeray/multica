@@ -615,6 +615,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				cs := lark.NewChannelStore(queries)
 				patcher := lark.NewPatcher(cs, installSvc, larkClient, lark.PatcherConfig{AppURL: appURLFromEnv()})
 				patcher.Register(bus)
+				h.LarkPatcher = patcher
+				h.LarkInboxDestinations = lark.NewInboxDestinationService(cs, installSvc, larkClient, lark.InboxDestinationConfig{Logger: slog.Default()})
 
 				// Typing indicator: shows a "processing" reaction on the user's
 				// message while the agent is working. Terminal cleanup has its own
@@ -1826,6 +1828,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// terminal failure.
 					r.Post("/lark/install/begin", h.BeginLarkInstall)
 					r.Get("/lark/install/{sessionId}/status", h.GetLarkInstallStatus)
+					// Explicit per-member inbox notification destination.
+					// The source item is always an inbox row; these routes
+					// only decide where that member's items are mirrored.
+					r.Get("/lark/inbox", h.GetLarkInboxSettings)
+					r.Put("/lark/inbox", h.SetLarkInboxDestination)
+					r.Delete("/lark/inbox", h.DisableLarkInboxDestination)
+					r.Post("/lark/inbox/test", h.TestLarkInboxDestination)
+					r.Post("/lark/inbox/install/begin", h.BeginLarkInboxInstall)
+					r.Post("/lark/inbox/deliveries/{deliveryId}/retry", h.RetryLarkInboxDelivery)
 				})
 
 				// Slack integration (MUL-3666). Same admin/member split as

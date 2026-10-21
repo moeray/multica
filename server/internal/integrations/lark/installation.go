@@ -20,6 +20,7 @@ import (
 type InstallationParams struct {
 	WorkspaceID     pgtype.UUID
 	AgentID         pgtype.UUID
+	Purpose         string
 	AppID           string
 	AppSecret       string // plaintext; encrypted at the service boundary
 	TenantKey       string // optional, "" treated as NULL
@@ -57,6 +58,7 @@ func NewInstallationService(queries *db.Queries, box *secretbox.Box) (*Installat
 // state; the encrypted secret column is included for completeness but
 // callers SHOULD NOT log or persist it elsewhere.
 func (s *InstallationService) Upsert(ctx context.Context, p InstallationParams) (Installation, error) {
+	p.Purpose = purposeOrDefault(p.Purpose)
 	if err := validateInstallationParams(p); err != nil {
 		return Installation{}, err
 	}
@@ -67,6 +69,7 @@ func (s *InstallationService) Upsert(ctx context.Context, p InstallationParams) 
 	return s.queries.UpsertLarkInstallation(ctx, UpsertInstallationParams{
 		WorkspaceID:        p.WorkspaceID,
 		AgentID:            p.AgentID,
+		Purpose:            p.Purpose,
 		AppID:              p.AppID,
 		AppSecretEncrypted: sealed,
 		TenantKey:          textOrNull(p.TenantKey),
@@ -134,10 +137,13 @@ func (s *InstallationService) ListByWorkspace(ctx context.Context, workspaceID p
 var ErrInstallationNotFound = errors.New("lark installation not found")
 
 func validateInstallationParams(p InstallationParams) error {
+	if p.Purpose != InstallationPurposeAgent && p.Purpose != InstallationPurposeInbox {
+		return errors.New("purpose must be 'agent' or 'inbox'")
+	}
 	switch {
 	case !p.WorkspaceID.Valid:
 		return errors.New("workspace_id is required")
-	case !p.AgentID.Valid:
+	case p.Purpose == InstallationPurposeAgent && !p.AgentID.Valid:
 		return errors.New("agent_id is required")
 	case !p.InstallerUserID.Valid:
 		return errors.New("installer_user_id is required")

@@ -259,6 +259,7 @@ type registrationSession struct {
 	id          string
 	workspaceID pgtype.UUID
 	agentID     pgtype.UUID
+	purpose     string
 	initiatorID pgtype.UUID
 
 	deviceCode string
@@ -383,6 +384,10 @@ type RegistrationSessionState struct {
 type BeginInstallParams struct {
 	WorkspaceID pgtype.UUID
 	AgentID     pgtype.UUID
+	// Purpose is "agent" (the default) for a bot that carries an agent's
+	// conversations, or "inbox" for a member's dedicated notification bot.
+	// An inbox bot deliberately has no agent row.
+	Purpose     string
 	InitiatorID pgtype.UUID
 	// Region picks which cloud's accounts host the device-flow begins
 	// against — Feishu (mainland, accounts.feishu.cn) or Lark
@@ -416,8 +421,15 @@ type BeginInstallResult struct {
 // the device_code is server-side only (Lark would honor a poll from
 // anywhere if the device_code leaked, so we never echo it).
 func (s *RegistrationService) BeginInstall(ctx context.Context, p BeginInstallParams) (BeginInstallResult, error) {
-	if !p.WorkspaceID.Valid || !p.AgentID.Valid || !p.InitiatorID.Valid {
-		return BeginInstallResult{}, errors.New("lark registration: workspace, agent, and initiator are required")
+	p.Purpose = purposeOrDefault(p.Purpose)
+	if !p.WorkspaceID.Valid || !p.InitiatorID.Valid {
+		return BeginInstallResult{}, errors.New("lark registration: workspace and initiator are required")
+	}
+	if p.Purpose == InstallationPurposeAgent && !p.AgentID.Valid {
+		return BeginInstallResult{}, errors.New("lark registration: agent is required for an agent bot")
+	}
+	if p.Purpose == InstallationPurposeInbox && p.AgentID.Valid {
+		return BeginInstallResult{}, errors.New("lark registration: an inbox bot must not be bound to an agent")
 	}
 	// Agent↔workspace pre-check — without this, a caller could open an
 	// install session against another workspace's agent by guessing the
@@ -428,12 +440,16 @@ func (s *RegistrationService) BeginInstall(ctx context.Context, p BeginInstallPa
 	// We keep the agent: its name pre-fills the bot name on Lark's
 	// PersonalAgent creation form (see botNamePreset) so the installed
 	// bot reads "<agent> - Multica" instead of "{用户姓名}的智能助手".
-	agent, err := s.authQueries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
-		ID:          p.AgentID,
-		WorkspaceID: p.WorkspaceID,
-	})
-	if err != nil {
-		return BeginInstallResult{}, fmt.Errorf("lark registration: agent not in workspace: %w", err)
+	botName := "Multica Inbox"
+	if p.Purpose == InstallationPurposeAgent {
+		agent, err := s.authQueries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
+			ID:          p.AgentID,
+			WorkspaceID: p.WorkspaceID,
+		})
+		if err != nil {
+			return BeginInstallResult{}, fmt.Errorf("lark registration: agent not in workspace: %w", err)
+		}
+		botName = botNamePreset(agent.Name)
 	}
 
 	// Normalize the requested region: empty / unknown → Feishu, the same
@@ -443,7 +459,7 @@ func (s *RegistrationService) BeginInstall(ctx context.Context, p BeginInstallPa
 	// field) keeps getting the historical mainland-first behaviour.
 	region := RegionOrDefault(string(p.Region))
 
-	begin, err := s.client.Begin(ctx, botNamePreset(agent.Name), region)
+	begin, err := s.client.Begin(ctx, botName, region)
 	if err != nil {
 		return BeginInstallResult{}, fmt.Errorf("lark registration: begin: %w", err)
 	}
@@ -479,6 +495,7 @@ func (s *RegistrationService) BeginInstall(ctx context.Context, p BeginInstallPa
 		id:          sessionID,
 		workspaceID: p.WorkspaceID,
 		agentID:     p.AgentID,
+		purpose:     p.Purpose,
 		initiatorID: p.InitiatorID,
 		deviceCode:  begin.DeviceCode,
 		domain:      begin.Domain,
@@ -662,6 +679,7 @@ func (s *RegistrationService) runPolling(sess *registrationSession) {
 // installation insert + installer binding, all in a single DB
 // transaction.
 func (s *RegistrationService) finishSuccess(ctx context.Context, sess *registrationSession, res *PollResult, region Region) {
+	sess.purpose = purposeOrDefault(sess.purpose)
 	// Carry the detected region onto the credentials so the GetBotInfo
 	// call below hits the right open-platform host: a Lark-international
 	// install must reach open.larksuite.com, not the Feishu default.
@@ -720,16 +738,19 @@ func (s *RegistrationService) finishSuccess(ctx context.Context, sess *registrat
 	// cleanly. A live owner is left in place (the SAME agent's own revoked row is
 	// reactivated in place by the upsert; an active/archived agent stays owned),
 	// so the upsert surfaces the conflict below instead of stealing the bot.
-	if err := qtx.ReclaimDeadInstallationByAppID(ctx, sess.workspaceID, sess.agentID, res.ClientID); err != nil {
-		s.cfg.Logger.Warn("lark registration: reclaim dead installation",
-			"session_id", sess.id, "err", err)
-		s.markError(sess, RegistrationReasonInternalError, err.Error())
-		return
+	if sess.purpose == InstallationPurposeAgent {
+		if err := qtx.ReclaimDeadInstallationByAppID(ctx, sess.workspaceID, sess.agentID, res.ClientID); err != nil {
+			s.cfg.Logger.Warn("lark registration: reclaim dead installation",
+				"session_id", sess.id, "err", err)
+			s.markError(sess, RegistrationReasonInternalError, err.Error())
+			return
+		}
 	}
 
 	inst, err := qtx.UpsertLarkInstallation(ctx, UpsertInstallationParams{
 		WorkspaceID:        sess.workspaceID,
 		AgentID:            sess.agentID,
+		Purpose:            sess.purpose,
 		AppID:              res.ClientID,
 		AppSecretEncrypted: sealed,
 		BotOpenID:          string(info.OpenID),
@@ -747,7 +768,11 @@ func (s *RegistrationService) finishSuccess(ctx context.Context, sess *registrat
 		msg := err.Error()
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			msg = s.liveOwnerConflictMessage(ctx, sess.workspaceID, res.ClientID)
+			if sess.purpose == InstallationPurposeInbox {
+				msg = "This Feishu app is already connected in this workspace. Disconnect the existing bot or choose a different app."
+			} else {
+				msg = s.liveOwnerConflictMessage(ctx, sess.workspaceID, res.ClientID)
+			}
 		}
 		s.markError(sess, RegistrationReasonInstallationConflict, msg)
 		return
@@ -780,6 +805,7 @@ func (s *RegistrationService) finishSuccess(ctx context.Context, sess *registrat
 		"session_id", sess.id,
 		"workspace_id", uuidString(sess.workspaceID),
 		"agent_id", uuidString(sess.agentID),
+		"purpose", sess.purpose,
 		"installation_id", uuidString(inst.ID))
 }
 

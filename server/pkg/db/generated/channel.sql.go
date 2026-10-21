@@ -104,7 +104,7 @@ WHERE id = $3
         OR ws_lease_expires_at < now()
         OR ws_lease_token = $1
   )
-RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at
+RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose
 `
 
 type AcquireChannelWSLeaseParams struct {
@@ -131,6 +131,7 @@ func (q *Queries) AcquireChannelWSLease(ctx context.Context, arg AcquireChannelW
 		&i.InstalledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Purpose,
 	)
 	return i, err
 }
@@ -480,6 +481,21 @@ cleared_user_bindings AS (
     DELETE FROM channel_user_binding AS user_binding
     WHERE user_binding.installation_id = $1
     RETURNING user_binding.id
+),
+cleared_inbox_destinations AS (
+    DELETE FROM inbox_lark_destination AS destination
+    WHERE destination.installation_id = $1
+    RETURNING destination.id
+),
+cancelled_inbox_deliveries AS (
+    UPDATE inbox_lark_delivery
+    SET status = 'cancelled',
+        cancelled_reason = 'target_removed',
+        claim_token = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+    WHERE installation_id = $1
+      AND status IN ('pending', 'retry')
 )
 SELECT
     (SELECT count(*) FROM cleared_user_bindings)::bigint AS user_bindings,
@@ -1701,7 +1717,7 @@ func (q *Queries) GetChannelChatSessionBindingBySessionAny(ctx context.Context, 
 }
 
 const getChannelInstallation = `-- name: GetChannelInstallation :one
-SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at FROM channel_installation
+SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose FROM channel_installation
 WHERE id = $1 AND channel_type = $2
 `
 
@@ -1728,14 +1744,16 @@ func (q *Queries) GetChannelInstallation(ctx context.Context, arg GetChannelInst
 		&i.InstalledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Purpose,
 	)
 	return i, err
 }
 
 const getChannelInstallationByAppID = `-- name: GetChannelInstallationByAppID :one
-SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at FROM channel_installation
+SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose FROM channel_installation
 WHERE channel_type = $1
   AND config ->> 'app_id' = $2::text
+  AND purpose = 'agent'
 `
 
 type GetChannelInstallationByAppIDParams struct {
@@ -1767,12 +1785,13 @@ func (q *Queries) GetChannelInstallationByAppID(ctx context.Context, arg GetChan
 		&i.InstalledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Purpose,
 	)
 	return i, err
 }
 
 const getChannelInstallationInWorkspace = `-- name: GetChannelInstallationInWorkspace :one
-SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at FROM channel_installation
+SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose FROM channel_installation
 WHERE id = $1
   AND workspace_id = $2
   AND channel_type = $3
@@ -1800,6 +1819,7 @@ func (q *Queries) GetChannelInstallationInWorkspace(ctx context.Context, arg Get
 		&i.InstalledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Purpose,
 	)
 	return i, err
 }
@@ -2103,11 +2123,12 @@ func (q *Queries) IsChannelMessageTypingActive(ctx context.Context, arg IsChanne
 }
 
 const listActiveChannelInstallations = `-- name: ListActiveChannelInstallations :many
-SELECT ci.id, ci.workspace_id, ci.agent_id, ci.channel_type, ci.config, ci.status, ci.ws_lease_token, ci.ws_lease_expires_at, ci.installer_user_id, ci.installed_at, ci.created_at, ci.updated_at FROM channel_installation ci
+SELECT ci.id, ci.workspace_id, ci.agent_id, ci.channel_type, ci.config, ci.status, ci.ws_lease_token, ci.ws_lease_expires_at, ci.installer_user_id, ci.installed_at, ci.created_at, ci.updated_at, ci.purpose FROM channel_installation ci
 JOIN workspace w ON w.id = ci.workspace_id
 JOIN agent a ON a.id = ci.agent_id
 WHERE ci.status = 'active'
   AND ci.channel_type = $1
+  AND ci.purpose = 'agent'
 ORDER BY ci.created_at ASC
 `
 
@@ -2145,6 +2166,7 @@ func (q *Queries) ListActiveChannelInstallations(ctx context.Context, channelTyp
 			&i.InstalledAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Purpose,
 		); err != nil {
 			return nil, err
 		}
@@ -2157,10 +2179,11 @@ func (q *Queries) ListActiveChannelInstallations(ctx context.Context, channelTyp
 }
 
 const listAllActiveChannelInstallations = `-- name: ListAllActiveChannelInstallations :many
-SELECT ci.id, ci.workspace_id, ci.agent_id, ci.channel_type, ci.config, ci.status, ci.ws_lease_token, ci.ws_lease_expires_at, ci.installer_user_id, ci.installed_at, ci.created_at, ci.updated_at FROM channel_installation ci
+SELECT ci.id, ci.workspace_id, ci.agent_id, ci.channel_type, ci.config, ci.status, ci.ws_lease_token, ci.ws_lease_expires_at, ci.installer_user_id, ci.installed_at, ci.created_at, ci.updated_at, ci.purpose FROM channel_installation ci
 JOIN workspace w ON w.id = ci.workspace_id
 JOIN agent a ON a.id = ci.agent_id
 WHERE ci.status = 'active'
+  AND ci.purpose = 'agent'
 ORDER BY ci.created_at ASC
 `
 
@@ -2195,6 +2218,7 @@ func (q *Queries) ListAllActiveChannelInstallations(ctx context.Context) ([]Chan
 			&i.InstalledAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Purpose,
 		); err != nil {
 			return nil, err
 		}
@@ -2296,9 +2320,10 @@ func (q *Queries) ListChannelInboundAuditByInstallation(ctx context.Context, arg
 }
 
 const listChannelInstallationsByWorkspace = `-- name: ListChannelInstallationsByWorkspace :many
-SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at FROM channel_installation
+SELECT id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose FROM channel_installation
 WHERE workspace_id = $1
   AND channel_type = $2
+  AND purpose = 'agent'
 ORDER BY created_at ASC
 `
 
@@ -2331,6 +2356,7 @@ func (q *Queries) ListChannelInstallationsByWorkspace(ctx context.Context, arg L
 			&i.InstalledAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Purpose,
 		); err != nil {
 			return nil, err
 		}
@@ -2719,9 +2745,10 @@ WITH dead AS (
       AND (
             (ci.status = 'revoked'
                 AND NOT (ci.workspace_id = $3
+                         AND ci.purpose = 'agent'
                          AND ci.agent_id = $4))
          OR NOT EXISTS (SELECT 1 FROM workspace w WHERE w.id = ci.workspace_id)
-         OR NOT EXISTS (SELECT 1 FROM agent a WHERE a.id = ci.agent_id)
+         OR (ci.purpose = 'agent' AND NOT EXISTS (SELECT 1 FROM agent a WHERE a.id = ci.agent_id))
       )
     RETURNING ci.id
 ),
@@ -2774,6 +2801,20 @@ cleared_binding_tokens AS (
 cleared_user_bindings AS (
     DELETE FROM channel_user_binding
     WHERE installation_id IN (SELECT id FROM dead)
+),
+cleared_inbox_destinations AS (
+    DELETE FROM inbox_lark_destination
+    WHERE installation_id IN (SELECT id FROM dead)
+),
+cancelled_inbox_deliveries AS (
+    UPDATE inbox_lark_delivery
+    SET status = 'cancelled',
+        cancelled_reason = 'target_removed',
+        claim_token = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+    WHERE installation_id IN (SELECT id FROM dead)
+      AND status IN ('pending', 'retry')
 ),
 cleared_inbound_dedup AS (
     DELETE FROM channel_inbound_message_dedup
@@ -3484,7 +3525,7 @@ ON CONFLICT (workspace_id, agent_id, channel_type) DO UPDATE SET
     status            = 'active',
     installed_at      = now(),
     updated_at        = now()
-RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at
+RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose
 `
 
 type UpsertChannelInstallationParams struct {
@@ -3540,6 +3581,7 @@ func (q *Queries) UpsertChannelInstallation(ctx context.Context, arg UpsertChann
 		&i.InstalledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Purpose,
 	)
 	return i, err
 }
@@ -3558,7 +3600,7 @@ ON CONFLICT (channel_type, (config ->> 'app_id')) DO UPDATE SET
     installed_at      = now(),
     updated_at        = now()
 WHERE channel_installation.workspace_id = EXCLUDED.workspace_id
-RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at
+RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at, purpose
 `
 
 type UpsertChannelInstallationByAppIDParams struct {
@@ -3610,6 +3652,7 @@ func (q *Queries) UpsertChannelInstallationByAppID(ctx context.Context, arg Upse
 		&i.InstalledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Purpose,
 	)
 	return i, err
 }

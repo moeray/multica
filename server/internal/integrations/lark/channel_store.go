@@ -119,7 +119,9 @@ func (s *ChannelStore) ListActiveLarkInstallations(ctx context.Context) ([]Insta
 }
 
 func (s *ChannelStore) UpsertLarkInstallation(ctx context.Context, arg UpsertInstallationParams) (Installation, error) {
+	purpose := purposeOrDefault(arg.Purpose)
 	cfg, err := encodeInstallConfig(Installation{
+		Purpose:            purpose,
 		AppID:              arg.AppID,
 		AppSecretEncrypted: arg.AppSecretEncrypted,
 		TenantKey:          arg.TenantKey,
@@ -129,6 +131,18 @@ func (s *ChannelStore) UpsertLarkInstallation(ctx context.Context, arg UpsertIns
 	})
 	if err != nil {
 		return Installation{}, err
+	}
+	if purpose == InstallationPurposeInbox {
+		row, err := s.Queries.UpsertInboxChannelInstallation(ctx, db.UpsertInboxChannelInstallationParams{
+			WorkspaceID:     arg.WorkspaceID,
+			ChannelType:     channelTypeFeishu,
+			Config:          cfg,
+			InstallerUserID: arg.InstallerUserID,
+		})
+		if err != nil {
+			return Installation{}, err
+		}
+		return installationFromRow(row)
 	}
 	row, err := s.Queries.UpsertChannelInstallation(ctx, db.UpsertChannelInstallationParams{
 		WorkspaceID:     arg.WorkspaceID,

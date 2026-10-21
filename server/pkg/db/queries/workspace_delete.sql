@@ -490,6 +490,12 @@ deleted_channel_user_bindings AS (
 deleted_channel_binding_tokens AS (
     DELETE FROM channel_binding_token WHERE workspace_id = $1
 ),
+deleted_inbox_lark_destinations AS (
+    DELETE FROM inbox_lark_destination WHERE workspace_id = $1
+),
+deleted_inbox_lark_deliveries AS (
+    DELETE FROM inbox_lark_delivery WHERE workspace_id = $1
+),
 deleted_lark_chat_bindings AS (
     DELETE FROM lark_chat_session_binding
     WHERE installation_id IN (SELECT id FROM ws_lark_installations)

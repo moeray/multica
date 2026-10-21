@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -48,6 +49,202 @@ type fakePatcherQueries struct {
 	deliveriesByTask map[string]db.ChannelTaskDelivery
 	// tasksByID overrides `task` per task_id; empty falls back to `task`.
 	tasksByID map[string]db.AgentTaskQueue
+
+	// Inbox destination + durable delivery outbox state.
+	inboxDestinations   map[string]db.InboxLarkDestination
+	inboxDestinationErr error
+	inboxDeliveries     map[string]*db.InboxLarkDelivery
+	inboxDeliveryOrder  []string
+	inboxNow            func() time.Time
+}
+
+func (f *fakePatcherQueries) inboxNowTime() time.Time {
+	if f.inboxNow != nil {
+		return f.inboxNow()
+	}
+	return time.Now()
+}
+
+func inboxMemberKey(workspaceID, memberID pgtype.UUID) string {
+	return uuidString(workspaceID) + "/" + uuidString(memberID)
+}
+
+func (f *fakePatcherQueries) GetInboxLarkDestination(_ context.Context, workspaceID, memberID pgtype.UUID) (db.InboxLarkDestination, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.inboxDestinationErr != nil {
+		return db.InboxLarkDestination{}, f.inboxDestinationErr
+	}
+	destination, ok := f.inboxDestinations[inboxMemberKey(workspaceID, memberID)]
+	if !ok {
+		return db.InboxLarkDestination{}, pgx.ErrNoRows
+	}
+	return destination, nil
+}
+
+func (f *fakePatcherQueries) FindChannelBindingForMemberOnInstallation(_ context.Context, workspaceID, memberID, installationID pgtype.UUID) (db.ChannelUserBinding, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	destination, ok := f.inboxDestinations[inboxMemberKey(workspaceID, memberID)]
+	if !ok || destination.InstallationID != installationID {
+		return db.ChannelUserBinding{}, pgx.ErrNoRows
+	}
+	return db.ChannelUserBinding{
+		WorkspaceID:    workspaceID,
+		MulticaUserID:  memberID,
+		InstallationID: installationID,
+		ChannelUserID:  destination.ChannelUserID,
+	}, nil
+}
+
+func (f *fakePatcherQueries) CreateInboxLarkDelivery(_ context.Context, arg db.CreateInboxLarkDeliveryParams) (db.InboxLarkDelivery, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.inboxDeliveries == nil {
+		f.inboxDeliveries = make(map[string]*db.InboxLarkDelivery)
+	}
+	if existing, ok := f.inboxDeliveries[arg.IdempotencyKey]; ok {
+		return *existing, nil
+	}
+	id, _ := uuid.NewRandom()
+	delivery := &db.InboxLarkDelivery{
+		ID:                pgtype.UUID{Bytes: [16]byte(id), Valid: true},
+		WorkspaceID:       arg.WorkspaceID,
+		InboxItemID:       arg.InboxItemID,
+		RecipientMemberID: arg.RecipientMemberID,
+		InstallationID:    arg.InstallationID,
+		ChannelUserID:     arg.ChannelUserID,
+		IdempotencyKey:    arg.IdempotencyKey,
+		Payload:           arg.Payload,
+		Status:            "pending",
+		NextAttemptAt:     pgtype.Timestamptz{Time: f.inboxNowTime(), Valid: true},
+		CreatedAt:         pgtype.Timestamptz{Time: f.inboxNowTime(), Valid: true},
+		UpdatedAt:         pgtype.Timestamptz{Time: f.inboxNowTime(), Valid: true},
+	}
+	f.inboxDeliveries[arg.IdempotencyKey] = delivery
+	f.inboxDeliveryOrder = append(f.inboxDeliveryOrder, arg.IdempotencyKey)
+	return *delivery, nil
+}
+
+func (f *fakePatcherQueries) ClaimNextInboxLarkDelivery(_ context.Context, claimToken pgtype.UUID) (db.InboxLarkDelivery, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.inboxNowTime()
+	for _, key := range f.inboxDeliveryOrder {
+		delivery := f.inboxDeliveries[key]
+		if delivery.Status != "pending" && delivery.Status != "retry" {
+			continue
+		}
+		if delivery.NextAttemptAt.Valid && delivery.NextAttemptAt.Time.After(now) {
+			continue
+		}
+		delivery.Status = "sending"
+		delivery.ClaimToken = claimToken
+		delivery.ClaimExpiresAt = pgtype.Timestamptz{Time: now.Add(2 * time.Minute), Valid: true}
+		delivery.Attempts++
+		delivery.UpdatedAt = pgtype.Timestamptz{Time: now, Valid: true}
+		return *delivery, nil
+	}
+	return db.InboxLarkDelivery{}, pgx.ErrNoRows
+}
+
+func (f *fakePatcherQueries) MarkInboxLarkDeliveryDelivered(_ context.Context, id, claimToken pgtype.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delivery := f.inboxDeliveryByID(id)
+	if delivery == nil || delivery.Status != "sending" || delivery.ClaimToken != claimToken {
+		return 0, nil
+	}
+	now := f.inboxNowTime()
+	delivery.Status = "delivered"
+	delivery.DeliveredAt = pgtype.Timestamptz{Time: now, Valid: true}
+	delivery.ClaimToken = pgtype.UUID{}
+	delivery.ClaimExpiresAt = pgtype.Timestamptz{}
+	delivery.LastError = pgtype.Text{}
+	delivery.UpdatedAt = pgtype.Timestamptz{Time: now, Valid: true}
+	return 1, nil
+}
+
+func (f *fakePatcherQueries) RetryInboxLarkDelivery(_ context.Context, id, claimToken pgtype.UUID, nextAttemptAt pgtype.Timestamptz, lastError string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delivery := f.inboxDeliveryByID(id)
+	if delivery == nil || delivery.Status != "sending" || delivery.ClaimToken != claimToken {
+		return 0, nil
+	}
+	delivery.Status = "retry"
+	delivery.NextAttemptAt = nextAttemptAt
+	delivery.LastError = pgtype.Text{String: lastError, Valid: true}
+	delivery.ClaimToken = pgtype.UUID{}
+	delivery.ClaimExpiresAt = pgtype.Timestamptz{}
+	delivery.UpdatedAt = pgtype.Timestamptz{Time: f.inboxNowTime(), Valid: true}
+	return 1, nil
+}
+
+func (f *fakePatcherQueries) FailInboxLarkDelivery(_ context.Context, id, claimToken pgtype.UUID, lastError string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delivery := f.inboxDeliveryByID(id)
+	if delivery == nil || delivery.Status != "sending" || delivery.ClaimToken != claimToken {
+		return 0, nil
+	}
+	delivery.Status = "failed"
+	delivery.LastError = pgtype.Text{String: lastError, Valid: true}
+	delivery.ClaimToken = pgtype.UUID{}
+	delivery.ClaimExpiresAt = pgtype.Timestamptz{}
+	delivery.UpdatedAt = pgtype.Timestamptz{Time: f.inboxNowTime(), Valid: true}
+	return 1, nil
+}
+
+func (f *fakePatcherQueries) CancelInboxLarkDelivery(_ context.Context, id, claimToken pgtype.UUID, reason string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delivery := f.inboxDeliveryByID(id)
+	if delivery == nil || delivery.Status != "sending" || delivery.ClaimToken != claimToken {
+		return 0, nil
+	}
+	delivery.Status = "cancelled"
+	delivery.CancelledReason = pgtype.Text{String: reason, Valid: true}
+	delivery.ClaimToken = pgtype.UUID{}
+	delivery.ClaimExpiresAt = pgtype.Timestamptz{}
+	delivery.UpdatedAt = pgtype.Timestamptz{Time: f.inboxNowTime(), Valid: true}
+	return 1, nil
+}
+
+func (f *fakePatcherQueries) RecoverStaleInboxLarkDeliveries(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.inboxNowTime()
+	var recovered int64
+	for _, delivery := range f.inboxDeliveries {
+		if delivery.Status != "sending" || !delivery.ClaimExpiresAt.Valid || delivery.ClaimExpiresAt.Time.After(now) {
+			continue
+		}
+		destination, ok := f.inboxDestinations[inboxMemberKey(delivery.WorkspaceID, delivery.RecipientMemberID)]
+		if ok && destination.Status == "active" &&
+			destination.InstallationID == delivery.InstallationID &&
+			destination.ChannelUserID == delivery.ChannelUserID {
+			delivery.Status = "retry"
+			delivery.NextAttemptAt = pgtype.Timestamptz{Time: now, Valid: true}
+		} else {
+			delivery.Status = "cancelled"
+			delivery.CancelledReason = pgtype.Text{String: "target_changed_or_disabled", Valid: true}
+		}
+		delivery.ClaimToken = pgtype.UUID{}
+		delivery.ClaimExpiresAt = pgtype.Timestamptz{}
+		delivery.UpdatedAt = pgtype.Timestamptz{Time: now, Valid: true}
+		recovered++
+	}
+	return recovered, nil
+}
+
+func (f *fakePatcherQueries) inboxDeliveryByID(id pgtype.UUID) *db.InboxLarkDelivery {
+	for _, delivery := range f.inboxDeliveries {
+		if delivery.ID == id {
+			return delivery
+		}
+	}
+	return nil
 }
 
 func (f *fakePatcherQueries) GetAgentTask(ctx context.Context, id pgtype.UUID) (db.AgentTaskQueue, error) {
@@ -293,8 +490,10 @@ func newTestPatcher(t *testing.T) (*Patcher, *fakePatcherQueries, *fakeAPIClient
 			Status:             string(InstallationActive),
 			AgentID:            uuidFromString(t, "aaaa1111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
 		},
-		agent:   db.Agent{Name: "TestAgent"},
-		cardErr: pgx.ErrNoRows,
+		agent:             db.Agent{Name: "TestAgent"},
+		cardErr:           pgx.ErrNoRows,
+		inboxDestinations: make(map[string]db.InboxLarkDestination),
+		inboxDeliveries:   make(map[string]*db.InboxLarkDelivery),
 	}
 	api := &fakeAPIClient{
 		sendReturn:     "lark_card_msg_1",

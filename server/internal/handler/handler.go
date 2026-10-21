@@ -289,6 +289,12 @@ type Handler struct {
 	// UI consults IsConfigured() to decide whether to surface install
 	// entry points.
 	LarkAPIClient lark.APIClient
+	// LarkInboxDestinations is the member-facing explicit notification
+	// destination service. Nil when the Lark integration is not configured.
+	LarkInboxDestinations *lark.InboxDestinationService
+	// LarkPatcher owns the durable inbox delivery worker. main.go starts it
+	// beside the typing worker; the process owner joins it on shutdown.
+	LarkPatcher *lark.Patcher
 	// Composio integration (MUL-3720). Nil when COMPOSIO_API_KEY is unset;
 	// the composio HTTP handlers return 403 in that case. Wired in
 	// cmd/server/router.go after handler.New.

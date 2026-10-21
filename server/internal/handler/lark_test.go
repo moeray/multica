@@ -98,6 +98,51 @@ func TestListLarkInstallations_NotConfiguredReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestGetLarkInboxSettings_NotConfiguredReturnsEmpty(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/x/lark/inbox", nil)
+	w := httptest.NewRecorder()
+	h.GetLarkInboxSettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Configured       bool  `json:"configured"`
+		InstallSupported bool  `json:"install_supported"`
+		Targets          []any `json:"targets"`
+		Deliveries       []any `json:"deliveries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Configured || resp.InstallSupported {
+		t.Fatalf("configured=%v install_supported=%v, want false", resp.Configured, resp.InstallSupported)
+	}
+	if len(resp.Targets) != 0 || len(resp.Deliveries) != 0 {
+		t.Fatalf("expected empty lists, got targets=%d deliveries=%d", len(resp.Targets), len(resp.Deliveries))
+	}
+}
+
+func TestSetLarkInboxDestination_NotConfigured(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPut, "/api/workspaces/x/lark/inbox", strings.NewReader(`{"installation_id":"y"}`))
+	w := httptest.NewRecorder()
+	h.SetLarkInboxDestination(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestBeginLarkInboxInstall_NotConfigured(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/x/lark/inbox/install/begin", nil)
+	w := httptest.NewRecorder()
+	h.BeginLarkInboxInstall(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
 // TestListLarkInstallations_StubClientReportsInstallNotSupported pins
 // the front-half of the "don't expose a doomed install flow"
 // guarantee: even when the at-rest key + registration service are set,
@@ -322,6 +367,71 @@ func TestBeginLarkInstall_AuthorizesAgentOwnerAndAdmins(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBeginLarkInboxInstall_AllowsPlainMemberWithoutAgent pins the dedicated
+// inbox-bot path: no agent id is required, and a plain workspace member may
+// install a bot for their own inbox.
+func TestBeginLarkInboxInstall_AllowsPlainMemberWithoutAgent(t *testing.T) {
+	wireLarkInstallServices(t)
+	_, _, memberID := privateAgentTestFixture(t)
+
+	req := newRequestAs(memberID, http.MethodPost,
+		"/api/workspaces/"+testWorkspaceID+"/lark/inbox/install/begin?region=feishu", nil)
+	req = withURLParams(req, "id", testWorkspaceID)
+	w := httptest.NewRecorder()
+	testHandler.BeginLarkInboxInstall(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("BeginLarkInboxInstall: want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp BeginLarkInstallResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode begin response: %v", err)
+	}
+	if resp.SessionID == "" || resp.QRCodeURL == "" {
+		t.Fatalf("expected a session id and QR URL, got %+v", resp)
+	}
+}
+
+// TestListLarkInstallations_ExcludesInboxPurpose keeps the legacy agent-bot
+// list wire-compatible: dedicated inbox bots have no agent_id and must not
+// appear in an endpoint older clients already parse as agent installations.
+func TestListLarkInstallations_ExcludesInboxPurpose(t *testing.T) {
+	wireLarkInstallServices(t)
+	const appID = "cli_inbox_list_exclusion"
+	clean := func() {
+		_, _ = testPool.Exec(context.Background(),
+			`DELETE FROM channel_installation WHERE channel_type = 'feishu' AND config->>'app_id' = $1`, appID)
+	}
+	clean()
+	t.Cleanup(clean)
+
+	if _, err := testPool.Exec(context.Background(), `
+INSERT INTO channel_installation (workspace_id, agent_id, purpose, channel_type, config, installer_user_id)
+VALUES ($1, NULL, 'inbox', 'feishu', jsonb_build_object('app_id', $2::text), $3)
+`, testWorkspaceID, appID, testUserID); err != nil {
+		t.Fatalf("seed inbox installation: %v", err)
+	}
+
+	req := newRequest(http.MethodGet, "/api/workspaces/"+testWorkspaceID+"/lark/installations", nil)
+	req = withURLParams(req, "id", testWorkspaceID)
+	w := httptest.NewRecorder()
+	testHandler.ListLarkInstallations(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListLarkInstallations: want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Installations []LarkInstallationResponse `json:"installations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	for _, installation := range resp.Installations {
+		if installation.AppID == appID {
+			t.Fatal("dedicated inbox installation leaked into the agent-bot list")
+		}
 	}
 }
 
