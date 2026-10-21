@@ -35,7 +35,18 @@ var extContentTypes = map[string]string{
 	".wasm": "application/wasm",
 }
 
-const maxUploadSize = 100 << 20 // 100 MB
+const (
+	// maxUploadSize bounds the whole multipart request. The extra MiB leaves
+	// room for the multipart preamble and part headers so a 2 GiB file still
+	// fits under the cap.
+	maxUploadSize = 2<<30 + 1<<20
+
+	// maxUploadMemory is the point at which ParseMultipartForm spills a part
+	// to a temp file. Keeping it small is what makes multi-gigabyte uploads
+	// safe: the request body goes to disk and then streams to storage instead
+	// of being held in the process heap.
+	maxUploadMemory = 32 << 20
+)
 
 const defaultAttachmentDownloadURLTTL = 30 * time.Minute
 
@@ -388,7 +399,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+	if err := r.ParseMultipartForm(maxUploadMemory); err != nil {
 		writeError(w, http.StatusBadRequest, "file too large or invalid multipart form")
 		return
 	}
@@ -419,10 +430,15 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := io.ReadAll(file)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read file")
-		return
+	sizeBytes := header.Size
+	if sizeBytes < 0 {
+		if end, seekErr := file.Seek(0, io.SeekEnd); seekErr == nil {
+			sizeBytes = end
+		}
+		if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read file")
+			return
+		}
 	}
 
 	// Generate a UUIDv7 to use as both the attachment ID and S3 key.
@@ -456,7 +472,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			UploaderID:   parseUUID(uploaderID),
 			Filename:     header.Filename,
 			ContentType:  contentType,
-			SizeBytes:    int64(len(data)),
+			SizeBytes:    sizeBytes,
 		}
 
 		if issueID := r.FormValue("issue_id"); issueID != "" {
@@ -553,7 +569,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			params.ChatSessionID = task.ChatSessionID
 		}
 
-		link, err := h.Storage.Upload(r.Context(), key, data, contentType, header.Filename)
+		link, err := h.uploadStoredFile(r.Context(), key, file, sizeBytes, contentType, header.Filename)
 		if err != nil {
 			slog.Error("file upload failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "upload failed")
@@ -618,7 +634,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No workspace context (e.g. avatar upload) — upload directly.
-	link, err := h.Storage.Upload(r.Context(), key, data, contentType, header.Filename)
+	link, err := h.uploadStoredFile(r.Context(), key, file, sizeBytes, contentType, header.Filename)
 	if err != nil {
 		slog.Error("file upload failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "upload failed")
@@ -631,8 +647,22 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListAttachments — GET /api/issues/{id}/attachments
+// uploadStoredFile streams the multipart file to storage when the backend
+// supports it. Uploads are capped at 2 GiB, so io.ReadAll is only a fallback
+// for storage doubles that do not implement UploadStream; real stores must
+// never turn a large upload into a heap allocation.
+func (h *Handler) uploadStoredFile(ctx context.Context, key string, file io.ReadSeeker, sizeBytes int64, contentType, filename string) (string, error) {
+	if uploader, ok := h.Storage.(sourceContextStreamUploader); ok && sizeBytes >= 0 {
+		return uploader.UploadStream(ctx, key, file, sizeBytes, contentType, filename)
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", err
+	}
+	return h.Storage.Upload(ctx, key, data, contentType, filename)
+}
 
+// ListAttachments — GET /api/issues/{id}/attachments
 func (h *Handler) ListAttachments(w http.ResponseWriter, r *http.Request) {
 	issueID := chi.URLParam(r, "id")
 	issue, ok := h.loadIssueForUser(w, r, issueID)

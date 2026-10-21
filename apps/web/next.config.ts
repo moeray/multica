@@ -48,6 +48,11 @@ const nextConfig: NextConfig = {
     formats: ["image/avif", "image/webp"],
     qualities: [75, 80, 85],
   },
+  experimental: {
+    // Attachment downloads stream through the Next proxy. The default 30s
+    // proxy timeout is far too short for multi-gigabyte files.
+    proxyTimeout: 60 * 60 * 1000,
+  },
   async rewrites() {
     return {
       // Run before file-system routes so /docs isn't shadowed by the

@@ -118,7 +118,9 @@ export const config = {
   // request time instead of being baked into next.config.js at build time.
   matcher: [
     "/v1/:path*",
-    "/api/:path*",
+    // /api/upload-file is served by app/api/upload-file/route.ts so a 2 GiB
+    // upload can stream to the backend without Next's capped body clone.
+    "/api/((?!upload-file).*)",
     "/auth/:path*",
     "/uploads/:path*",
     "/docs/:path*",
