@@ -240,6 +240,9 @@ func TestInboxDestinationTestRecordsSuccessAndFailure(t *testing.T) {
 	if len(api.userTextSent) != 1 || api.userTextSent[0].OpenID != OpenID(inboxTestChannelUser) {
 		t.Fatalf("test send = %+v", api.userTextSent)
 	}
+	if got := len(api.userTextSent[0].UUID); got > 50 {
+		t.Fatalf("test uuid length = %d, want <= 50: %q", got, api.userTextSent[0].UUID)
+	}
 
 	api.userTextErr = errors.New("lark down")
 	result, err = service.Test(context.Background(), ws, member)

@@ -237,13 +237,19 @@ func (s *InboxDestinationService) Test(ctx context.Context, workspaceID, memberI
 		return InboxTestResult{Error: err.Error()}, nil
 	}
 
+	// Lark caps the message uuid at 50 characters. Hash the variable parts into
+	// a UUID-shaped value instead of concatenating the 36-char destination id
+	// and 19-digit timestamp, which exceeds that limit.
+	testUUID := "inbox-test-" + inboxProviderUUIDForDelivery(
+		fmt.Sprintf("%s:%d", uuidString(destination.ID), s.cfg.Now().UnixNano()),
+	)
 	_, sendErr := s.client.SendUserTextMessage(ctx, SendUserTextParams{
 		InstallationID: InstallationCredentials{
 			AppID: inst.AppID, AppSecret: creds, Region: RegionOrDefault(inst.Region),
 		},
 		OpenID: OpenID(destination.ChannelUserID),
 		Text:   "Multica inbox notification test",
-		UUID:   fmt.Sprintf("inbox-test-%s-%d", uuidString(destination.ID), s.cfg.Now().UnixNano()),
+		UUID:   testUUID,
 	})
 	if sendErr != nil {
 		_ = s.queries.RecordInboxLarkDestinationTest(ctx, destination.ID, "failed", sendErr.Error())
