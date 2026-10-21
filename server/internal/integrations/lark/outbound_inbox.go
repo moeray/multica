@@ -359,7 +359,9 @@ func inboxRetryDelay(attempts int32) time.Duration {
 // inboxDeliveryKey includes the recipient and the explicit target. Changing
 // either produces a different row; the item alone is never enough to resend.
 func inboxDeliveryKey(itemID, recipientID, installationID, channelUserID string) string {
-	return strings.Join([]string{itemID, recipientID, installationID, channelUserID}, "\x00")
+	// PostgreSQL TEXT rejects NUL bytes. Use the unit separator so the key
+	// remains collision-resistant without making the insert fail.
+	return strings.Join([]string{itemID, recipientID, installationID, channelUserID}, "\x1f")
 }
 
 // inboxProviderUUIDForDelivery derives Lark's idempotency key from the durable

@@ -314,6 +314,9 @@ func TestInboxDeliveryClaimIsExclusive(t *testing.T) {
 
 func TestInboxProviderUUIDIsStableAndTargetScoped(t *testing.T) {
 	key := inboxDeliveryKey("item", "recipient", "installation", "open-id")
+	if strings.ContainsRune(key, '\x00') {
+		t.Fatal("delivery key must not contain NUL; PostgreSQL TEXT rejects it")
+	}
 	base := inboxProviderUUIDForDelivery(key)
 	if len(base) != 36 || base[14] != '5' {
 		t.Fatalf("not a v5 uuid: %q", base)
