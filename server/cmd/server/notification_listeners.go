@@ -539,9 +539,11 @@ func notifyMentionedMembers(
 	issueTitle string,
 	issueStatus string,
 	title string,
+	body string,
 	skip map[string]bool,
 	details []byte,
-) {
+) map[string]bool {
+	notified := map[string]bool{}
 	// Collect the set of member IDs to notify.
 	recipientIDs := map[string]bool{}
 
@@ -623,6 +625,7 @@ func notifyMentionedMembers(
 			Severity:      "info",
 			IssueID:       parseUUID(issueID),
 			Title:         title,
+			Body:          util.StrToText(body),
 			ActorType:     util.StrToText(e.ActorType),
 			ActorID:       optionalUUID(e.ActorID),
 			Details:       details,
@@ -634,6 +637,7 @@ func notifyMentionedMembers(
 		if !inserted {
 			continue
 		}
+		notified[id] = true
 		resp := inboxItemToResponse(item)
 		resp["issue_status"] = issueStatus
 		bus.Publish(events.Event{
@@ -644,6 +648,8 @@ func notifyMentionedMembers(
 			Payload:     map[string]any{"item": resp},
 		})
 	}
+
+	return notified
 }
 
 // registerNotificationListeners wires up event bus listeners that create inbox
@@ -687,7 +693,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 		if issue.Description != nil && *issue.Description != "" {
 			mentions := parseMentions(*issue.Description)
 			notifyMentionedMembers(bus, queries, e, mentions, issue.ID, issue.Title, issue.Status,
-				issue.Title, skip, emptyDetails)
+				issue.Title, "", skip, emptyDetails)
 		}
 	})
 
@@ -876,7 +882,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 				}
 				skip := map[string]bool{e.ActorID: true}
 				notifyMentionedMembers(bus, queries, e, added, issue.ID, issue.Title, issue.Status,
-					issue.Title, skip, emptyDetails)
+					issue.Title, "", skip, emptyDetails)
 			}
 		}
 	})
@@ -929,18 +935,25 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 			})
 		}
 
-		notifySubscribers(ctx, queries, bus, issueID, issueStatus, e.WorkspaceID, e,
-			nil, "new_comment", "info",
-			issueTitle, commentContent,
-			commentDetails)
-
-		// Notify @mentions in comment content.
+		// A mentioned member gets the mention notification, not a second
+		// new_comment notification for the same comment. Create mentions first
+		// so the subscriber pass can exclude exactly those recipients.
 		mentions := parseMentions(commentContent)
+		mentionRecipients := map[string]bool{}
 		if len(mentions) > 0 {
 			skip := map[string]bool{e.ActorID: true}
-			notifyMentionedMembers(bus, queries, e, mentions, issueID, issueTitle, issueStatus,
-				issueTitle, skip, commentDetails)
+			mentionRecipients = notifyMentionedMembers(bus, queries, e, mentions, issueID, issueTitle, issueStatus,
+				issueTitle, commentContent, skip, commentDetails)
 		}
+
+		exclude := map[string]bool{e.ActorID: true}
+		for id := range mentionRecipients {
+			exclude[id] = true
+		}
+		notifySubscribers(ctx, queries, bus, issueID, issueStatus, e.WorkspaceID, e,
+			exclude, "new_comment", "info",
+			issueTitle, commentContent,
+			commentDetails)
 	})
 
 	// issue_reaction:added — notify the issue creator

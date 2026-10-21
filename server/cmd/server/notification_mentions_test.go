@@ -105,5 +105,52 @@ func TestNotifyMentionedMembersOnlyMalformedIDs(t *testing.T) {
 	// no valid recipients, neither the database nor the bus is needed.
 	notifyMentionedMembers(nil, nil, events.Event{},
 		parseMentions("[@Bad](mention://member/deadbeef) [@Bad all](mention://member/all)"),
-		"", "", "", "", nil, nil)
+		"", "", "", "", "", nil, nil)
+}
+
+func TestNotification_CommentMentionReplacesDuplicateNewComment(t *testing.T) {
+	fx := workspaceFixture(t)
+	recipientID := fx.User(t, "Mention recipient", "mention-dedupe@multica.ai")
+	fx.Member(t, testWorkspaceID, recipientID, "member")
+	otherID := fx.User(t, "Other subscriber", "mention-dedupe-other@multica.ai")
+	fx.Member(t, testWorkspaceID, otherID, "member")
+	issueID := fx.Issue(t, "Mention dedupe")
+	fx.Cleanup(t, `DELETE FROM inbox_item WHERE issue_id = $1`, issueID)
+	fx.Cleanup(t, `DELETE FROM issue_subscriber WHERE issue_id = $1`, issueID)
+	addTestSubscriber(t, issueID, "member", recipientID, "manual")
+	addTestSubscriber(t, issueID, "member", otherID, "manual")
+
+	content := "[@Recipient](mention://member/" + recipientID + ") please check"
+	commentID := fx.Comment(t, issueID, content)
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "member",
+		ActorID:     testUserID,
+		Payload: map[string]any{
+			"comment": handler.CommentResponse{
+				ID: commentID, IssueID: issueID, AuthorType: "member",
+				AuthorID: testUserID, Content: content,
+			},
+			"issue_title": "Mention dedupe", "issue_status": "todo",
+		},
+	})
+
+	items := inboxItemsForRecipient(t, queries, recipientID)
+	if len(items) != 1 {
+		t.Fatalf("mentioned subscriber got %d inbox items, want 1", len(items))
+	}
+	if items[0].Type != "mentioned" {
+		t.Fatalf("type = %q, want mentioned", items[0].Type)
+	}
+	if !items[0].Body.Valid || items[0].Body.String != content {
+		t.Fatalf("body = %+v, want comment content", items[0].Body)
+	}
+
+	otherItems := inboxItemsForRecipient(t, queries, otherID)
+	if len(otherItems) != 1 || otherItems[0].Type != "new_comment" {
+		t.Fatalf("other subscriber items = %+v, want one new_comment", otherItems)
+	}
 }
