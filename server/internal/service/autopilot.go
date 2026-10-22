@@ -1426,12 +1426,7 @@ func (s *AutopilotService) messageRunResult(ctx context.Context, ap db.Autopilot
 	if task.ChatSessionID.Valid {
 		msg, err := s.Queries.GetChatMessageByTaskAssistant(ctx, task.ID)
 		if err != nil {
-			slog.Warn("message autopilot: assistant reply lookup failed; keeping task result",
-				"run_id", util.UUIDToString(run.ID),
-				"task_id", util.UUIDToString(task.ID),
-				"error", err,
-			)
-			return task.Result, nil
+			return nil, fmt.Errorf("load assistant report message: %w", err)
 		}
 		result, err := json.Marshal(map[string]string{
 			"chat_session_id": util.UUIDToString(task.ChatSessionID),

@@ -743,7 +743,7 @@ const deleteUserChatMessageByTask = `-- name: DeleteUserChatMessageByTask :one
 DELETE FROM chat_message
 WHERE task_id = $1
   AND role = 'user'
-  AND message_kind <> 'onboarding_kickoff'
+  AND message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
 RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled
 `
 
@@ -758,6 +758,10 @@ RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reaso
 // member the product's internal prompt as their restored draft, and silently
 // drop what they actually typed. Callers release the kickoff separately
 // (ReleaseOnboardingKickoffFromTask) so the next send re-adopts it.
+//
+// autopilot_kickoff is the same hazard for message-mode autopilot tasks: it is
+// server-authored context, never the member's draft. Cancelling or editing such
+// a queued task must leave it in place rather than restore the internal prompt.
 func (q *Queries) DeleteUserChatMessageByTask(ctx context.Context, taskID pgtype.UUID) (ChatMessage, error) {
 	row := q.db.QueryRow(ctx, deleteUserChatMessageByTask, taskID)
 	var i ChatMessage
@@ -2487,6 +2491,7 @@ LEFT JOIN LATERAL (
     FROM chat_message AS input
     WHERE input.task_id = COALESCE(task.chat_input_task_id, task.id)
       AND input.role = 'user'
+      AND input.message_kind <> 'autopilot_kickoff'
     ORDER BY input.created_at ASC, input.id ASC
     LIMIT 1
 ) AS message ON TRUE
@@ -3140,7 +3145,7 @@ WITH latest_visible AS (
       -- moving it to dispatch time reverses that, and because the batch's two
       -- rows would then share one timestamp, their order falls to random UUIDs
       -- (MUL-5827).
-      AND claimed_input.message_kind <> 'onboarding_kickoff'
+      AND claimed_input.message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
 )
 UPDATE chat_message AS claimed_input
 SET created_at = GREATEST(
@@ -3195,7 +3200,7 @@ WHERE queued_input.chat_session_id = $1
   -- Same exclusion, same reason as ReanchorClaimedDirectChatInput: the hidden
   -- kickoff has no visible position to fix, and moving it would put the
   -- product's context after the member's message inside one input batch.
-  AND queued_input.message_kind <> 'onboarding_kickoff'
+  AND queued_input.message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
   AND queued_input.created_at <= $2::timestamptz
   AND EXISTS (
     SELECT 1

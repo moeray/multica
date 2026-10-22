@@ -1989,7 +1989,7 @@ type ChatLastMessage struct {
 // buildChatLastMessage assembles the preview from list-row columns; returns nil
 // when there is no last message (the LEFT JOIN produced a NULL timestamp).
 func buildChatLastMessage(at pgtype.Timestamptz, content, role string, failure pgtype.Text, kind string) *ChatLastMessage {
-	if !at.Valid || kind == protocol.ChatMessageKindOnboardingKickoff {
+	if !at.Valid || kind == protocol.ChatMessageKindOnboardingKickoff || kind == protocol.ChatMessageKindAutopilotKickoff {
 		return nil
 	}
 	return &ChatLastMessage{
@@ -2104,6 +2104,8 @@ func normalizeMessageKind(kind string) string {
 		return protocol.ChatMessageKindOnboardingKickoff
 	case protocol.ChatMessageKindOnboardingOpening:
 		return protocol.ChatMessageKindOnboardingOpening
+	case protocol.ChatMessageKindAgentReport:
+		return protocol.ChatMessageKindAgentReport
 	default:
 		return protocol.ChatMessageKindMessage
 	}

@@ -412,3 +412,75 @@ func TestFallbackDeliveryFailureMarksRunFailed(t *testing.T) {
 		t.Fatalf("failure_reason = %q, want message delivery failure", updated.FailureReason.String)
 	}
 }
+
+func TestSettleQueuedAutopilotKickoffDoesNotRestoreDraft(t *testing.T) {
+	pool := sharedTestPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	workspaceID, userID, agentID, _ := seedAttributionFixture(t, pool)
+
+	var sessionID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title)
+		VALUES ($1, $2, $3, 'Autopilot queue') RETURNING id`,
+		workspaceID, agentID, userID).Scan(&sessionID); err != nil {
+		t.Fatalf("seed chat session: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM chat_draft_restore WHERE chat_session_id = $1`, sessionID)
+		pool.Exec(context.Background(), `DELETE FROM chat_message WHERE chat_session_id = $1`, sessionID)
+		pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE chat_session_id = $1`, sessionID)
+		pool.Exec(context.Background(), `DELETE FROM chat_session WHERE id = $1`, sessionID)
+	})
+
+	var taskID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, chat_session_id)
+		SELECT $1, runtime_id, 'queued', 0, $2 FROM agent WHERE id = $1
+		RETURNING id`, agentID, sessionID).Scan(&taskID); err != nil {
+		t.Fatalf("seed queued task: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET chat_input_task_id = id WHERE id = $1`, taskID); err != nil {
+		t.Fatalf("stamp task input owner: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO chat_message (chat_session_id, role, content, task_id, message_kind)
+		VALUES ($1, 'user', 'INTERNAL AUTOPILOT PROMPT', $2, 'autopilot_kickoff')`,
+		sessionID, taskID); err != nil {
+		t.Fatalf("seed kickoff: %v", err)
+	}
+
+	task, err := q.GetAgentTask(ctx, util.MustParseUUID(taskID))
+	if err != nil {
+		t.Fatalf("load queued task: %v", err)
+	}
+	svc := newMessageAutopilotService(pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin settle tx: %v", err)
+	}
+	if _, err := svc.TaskSvc.settleQueuedChatInput(ctx, q.WithTx(tx), task, "edit"); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("settle queued kickoff: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit settle tx: %v", err)
+	}
+
+	var kickoffs, restores int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM chat_message
+		WHERE task_id = $1 AND message_kind = 'autopilot_kickoff'`, taskID).Scan(&kickoffs); err != nil {
+		t.Fatalf("count kickoff: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM chat_draft_restore WHERE chat_session_id = $1`, sessionID).Scan(&restores); err != nil {
+		t.Fatalf("count draft restores: %v", err)
+	}
+	if kickoffs != 1 {
+		t.Fatalf("kickoff rows = %d, want 1 (internal prompt must stay hidden)", kickoffs)
+	}
+	if restores != 0 {
+		t.Fatalf("draft restores = %d, want 0 (kickoff must not become a member draft)", restores)
+	}
+}

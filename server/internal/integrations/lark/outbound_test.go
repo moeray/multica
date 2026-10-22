@@ -540,6 +540,36 @@ func TestPatcherSendsSealedChannelTaskReply(t *testing.T) {
 	}
 }
 
+// A message-mode autopilot task starts from a hidden server-authored kickoff,
+// so its input batch is not channel-ingested. Its delivery snapshot still says
+// the reply belongs in the bound p2p conversation; the autopilot run id is the
+// discriminator that lets that one case through.
+func TestPatcherDeliversAutopilotMessageTaskWithoutChannelInput(t *testing.T) {
+	p, q, api := newTestPatcher(t)
+	taskID := uuidFromString(t, "ee565656-ee56-ee56-ee56-eeeeeeeeeeee")
+	q.task = db.AgentTaskQueue{
+		ChatInputTaskID: taskID,
+		AutopilotRunID:  uuidFromString(t, "aa565656-aa56-aa56-aa56-aaaaaaaaaaaa"),
+	}
+
+	p.handleEvent(events.Event{
+		Type:          protocol.EventChatDone,
+		TaskID:        uuidString(taskID),
+		ChatSessionID: uuidString(q.binding.ChatSessionID),
+		Payload: protocol.ChatDonePayload{
+			TaskID:        uuidString(taskID),
+			ChatSessionID: uuidString(q.binding.ChatSessionID),
+			Content:       "autopilot report",
+		},
+	})
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.textSent) != 1 || api.textSent[0].Text != "autopilot report" {
+		t.Fatalf("autopilot message reply must reach Lark; textSent=%+v", api.textSent)
+	}
+}
+
 func TestPatcherSendsPlainTextOnChatDone(t *testing.T) {
 	p, q, api := newTestPatcher(t)
 	taskID := uuidFromString(t, "ee333333-ee33-ee33-ee33-eeeeeeeeeeee")

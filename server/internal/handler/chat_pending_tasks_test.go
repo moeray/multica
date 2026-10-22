@@ -336,6 +336,46 @@ func TestGetPendingChatTask_ReturnsActiveHeadAndFIFOQueue(t *testing.T) {
 	}
 }
 
+func TestGetPendingChatTask_DoesNotExposeAutopilotKickoff(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	agentID := createHandlerTestAgent(t, "PendingAutopilotKickoffAgent", []byte("[]"))
+	sessionID := createHandlerTestChatSession(t, agentID)
+	insertPendingChatTask(t, agentID, sessionID, "running")
+	autopilotTaskID := insertPendingChatTask(t, agentID, sessionID, "queued")
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE agent_task_queue SET chat_input_task_id = id WHERE id = $1
+	`, autopilotTaskID); err != nil {
+		t.Fatalf("stamp autopilot input owner: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO chat_message (chat_session_id, role, content, task_id, message_kind)
+		VALUES ($1, 'user', 'INTERNAL AUTOPILOT PROMPT', $2, 'autopilot_kickoff')
+	`, sessionID, autopilotTaskID); err != nil {
+		t.Fatalf("insert autopilot kickoff: %v", err)
+	}
+
+	req := newRequest("GET", "/api/chat/sessions/"+sessionID+"/pending-task", nil)
+	req = withURLParam(req, "sessionId", sessionID)
+	req = chatPendingCtxAs(t, req, testUserID)
+	w := httptest.NewRecorder()
+	testHandler.GetPendingChatTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetPendingChatTask: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp PendingChatTaskResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode pending task: %v", err)
+	}
+	if len(resp.QueuedTasks) != 1 || resp.QueuedTasks[0].TaskID != autopilotTaskID {
+		t.Fatalf("queued tasks = %+v, want the autopilot task", resp.QueuedTasks)
+	}
+	if resp.QueuedTasks[0].Content != "" {
+		t.Fatalf("queued autopilot content = %q, want empty (kickoff hidden)", resp.QueuedTasks[0].Content)
+	}
+}
+
 func TestListChatMessagesPage_QueuedFollowUpsDoNotConsumeLimit(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
