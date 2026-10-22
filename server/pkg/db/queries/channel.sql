@@ -1061,6 +1061,44 @@ RETURNING *;
 -- name: GetChannelTaskDelivery :one
 SELECT * FROM channel_task_delivery WHERE task_id = $1;
 
+-- name: GetLarkP2PChatSessionBindingForMember :one
+-- Resolves the existing Feishu p2p conversation between an agent and a member.
+-- p2p sessions are created with the member as creator (the sole human), which
+-- is the only stable link from a Multica member to the platform chat id: the
+-- chat id itself is opaque and cannot be derived from an open_id.
+SELECT binding.*
+FROM channel_chat_session_binding AS binding
+JOIN chat_session AS session ON session.id = binding.chat_session_id
+JOIN channel_installation AS installation ON installation.id = binding.installation_id
+WHERE installation.workspace_id = $1
+  AND installation.agent_id = $2
+  AND installation.channel_type = 'feishu'
+  AND installation.status = 'active'
+  AND binding.channel_type = 'feishu'
+  AND binding.chat_type = 'p2p'
+  AND binding.retired_at IS NULL
+  AND session.creator_id = $3
+  AND session.status = 'active'
+ORDER BY binding.created_at DESC, binding.id DESC
+LIMIT 1;
+
+-- name: CreateAutopilotChatTaskDelivery :one
+-- Freezes the outbound route for an autopilot message task. Unlike an inbound
+-- channel turn there is no trigger message or context generation to copy: the
+-- report is a new standalone message in the existing conversation.
+INSERT INTO channel_task_delivery (
+    task_id, binding_id, installation_id, channel_type, channel_chat_id, chat_type,
+    channel_message_id, channel_thread_id, channel_sender_id, route_revision, config
+)
+SELECT
+    @task_id, binding.id, binding.installation_id, binding.channel_type,
+    binding.channel_chat_id, binding.chat_type,
+    NULL, NULL, NULL, binding.route_revision, binding.config
+FROM channel_chat_session_binding AS binding
+WHERE binding.id = @binding_id
+  AND binding.retired_at IS NULL
+RETURNING *;
+
 -- name: CopyChannelTaskDelivery :exec
 INSERT INTO channel_task_delivery (
     task_id, binding_id, installation_id, channel_type, channel_chat_id, chat_type,

@@ -264,7 +264,11 @@ export function ChatMessageList({
   // a visible bubble.
   const renderItems: ChatRenderItem[] = useMemo(() => {
     const items: ChatRenderItem[] = messages
-      .filter((message) => message.message_kind !== "onboarding_kickoff")
+      .filter(
+        (message) =>
+          message.message_kind !== "onboarding_kickoff" &&
+          message.message_kind !== "autopilot_kickoff",
+      )
       .map((message) => ({
         key: messageRowKey(message),
         kind: "message" as const,

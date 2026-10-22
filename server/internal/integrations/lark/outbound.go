@@ -341,7 +341,14 @@ func (p *Patcher) processEvent(ctx context.Context, e events.Event) error {
 		return fmt.Errorf("classify task input origin: %w", err)
 	}
 	if !deliver {
-		return nil
+		// A message-mode autopilot task intentionally starts from a hidden
+		// server-authored kickoff, not a channel-ingested input batch. Its
+		// delivery snapshot is the explicit signal that the reply belongs in
+		// the bound conversation. Every other chat task without channel input
+		// stays private to Multica.
+		if !task.AutopilotRunID.Valid {
+			return nil
+		}
 	}
 
 	inst, err := p.queries.GetLarkInstallation(ctx, binding.InstallationID)

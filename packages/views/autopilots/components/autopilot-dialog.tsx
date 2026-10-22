@@ -11,6 +11,7 @@ import {
   FilePlus2,
   FolderKanban,
   Maximize2,
+  MessageSquare,
   Minimize2,
   Play,
   Plus,
@@ -106,11 +107,12 @@ export type AutopilotDialogProps =
 
 // Static schema-level data (not user-visible)
 
-const OUTPUT_MODE_KEYS: AutopilotExecutionMode[] = ["create_issue", "run_only"];
+const OUTPUT_MODE_KEYS: AutopilotExecutionMode[] = ["create_issue", "run_only", "message"];
 
 const OUTPUT_MODE_ICONS: Record<AutopilotExecutionMode, typeof FilePlus2> = {
   create_issue: FilePlus2,
   run_only: Play,
+  message: MessageSquare,
 };
 
 // Webhook event-filter dirty detection

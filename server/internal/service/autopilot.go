@@ -27,6 +27,7 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
 
 // TxStarter abstracts transaction creation (satisfied by pgxpool.Pool).
@@ -228,7 +229,7 @@ func (s *AutopilotService) AdmitAutopilotWebhookDelivery(
 	}
 
 	initialStatus := "issue_created"
-	if autopilot.ExecutionMode == "run_only" {
+	if autopilot.ExecutionMode == "run_only" || autopilot.ExecutionMode == "message" {
 		initialStatus = "running"
 	}
 	run, _, err := s.createAutopilotRunWithQuota(ctx, autopilot.WorkspaceID, "webhook", "webhook:"+util.UUIDToString(deliveryID), db.CreateAutopilotRunParams{
@@ -301,7 +302,7 @@ func (s *AutopilotService) DispatchAutopilotForWebhookDelivery(
 	// A run_only task may have committed immediately before the process died
 	// while linking task_id back to the run. Repair that linkage and wake the
 	// daemon; otherwise continue the same partial run below.
-	if autopilot.ExecutionMode == "run_only" && !run.TaskID.Valid {
+	if (autopilot.ExecutionMode == "run_only" || autopilot.ExecutionMode == "message") && !run.TaskID.Valid {
 		repaired, found, repairErr := s.repairAutopilotRunTaskLink(ctx, *run)
 		if repairErr != nil {
 			return run, fmt.Errorf("dispatch for webhook delivery: %w", repairErr)
@@ -471,7 +472,7 @@ func (s *AutopilotService) DispatchAutopilotForPlan(
 		return &existing, nil
 
 	case err == nil:
-		if autopilot.ExecutionMode == "run_only" && !existing.TaskID.Valid {
+		if (autopilot.ExecutionMode == "run_only" || autopilot.ExecutionMode == "message") && !existing.TaskID.Valid {
 			repaired, found, repairErr := s.repairAutopilotRunTaskLink(ctx, existing)
 			if repairErr != nil {
 				return nil, fmt.Errorf("dispatch for plan: %w", repairErr)
@@ -570,7 +571,7 @@ func (s *AutopilotService) dispatchAutopilot(
 
 	// Determine initial status based on execution mode.
 	initialStatus := "issue_created"
-	if autopilot.ExecutionMode == "run_only" {
+	if autopilot.ExecutionMode == "run_only" || autopilot.ExecutionMode == "message" {
 		initialStatus = "running"
 	}
 
@@ -631,6 +632,15 @@ func (s *AutopilotService) dispatchAutopilotRun(
 			s.failRun(ctx, run.ID, err.Error())
 			s.captureAutopilotRunFailed(autopilot, *run, source, err.Error())
 			return run, dispatchFailReasonCode(err), fmt.Errorf("dispatch run_only: %w", err)
+		}
+	case "message":
+		if err := s.dispatchMessage(ctx, autopilot, run, actorUserID); err != nil {
+			if skipped, code := s.handleDispatchSkip(ctx, autopilot, run, err); skipped != nil {
+				return skipped, code, nil
+			}
+			s.failRun(ctx, run.ID, err.Error())
+			s.captureAutopilotRunFailed(autopilot, *run, source, err.Error())
+			return run, dispatchFailReasonCode(err), fmt.Errorf("dispatch message: %w", err)
 		}
 	default:
 		s.failRun(ctx, run.ID, "unknown execution_mode: "+autopilot.ExecutionMode)
@@ -1077,12 +1087,218 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 	// stall the task until the TTL expired.
 	s.TaskSvc.NotifyTaskEnqueued(ctx, task)
 
-	slog.Info("autopilot dispatched (run_only)",
+	slog.Info("autopilot dispatched",
 		"autopilot_id", util.UUIDToString(ap.ID),
+		"execution_mode", ap.ExecutionMode,
 		"task_id", util.UUIDToString(task.ID),
 		"run_id", util.UUIDToString(run.ID),
 	)
 	return nil
+}
+
+// autopilotTaskAttribution resolves the human attribution shared by the
+// issue-less execution modes (run_only and message). A MANUAL trigger is a
+// direct human action: the triggering member is direct_human. A schedule /
+// webhook trigger resolves the firing trigger's created_by principal,
+// degrading to the rule version publisher (rule_owner, audit-only) when it has
+// none, then to unattributed. Evidence always points at the autopilot run, so
+// the row is never a NULL-source bypass.
+func (s *AutopilotService) autopilotTaskAttribution(
+	ctx context.Context,
+	ap db.Autopilot,
+	run *db.AutopilotRun,
+	agent db.Agent,
+	actorUserID pgtype.UUID,
+) (attribution.Result, error) {
+	var result attribution.Result
+	if actorUserID.Valid {
+		result = attribution.DirectHumanRun(actorUserID, attribution.EvidenceAutopilotRun, run.ID)
+	} else {
+		result = triggerOwnerAttribution(ctx, s.Queries, run.TriggerID, ap.WorkspaceID, ap.ID, attribution.EvidenceAutopilotRun, run.ID)
+	}
+	result, err := s.TaskSvc.applyAttributionFallback(ctx, result, agent)
+	if err != nil {
+		return attribution.Result{}, &errDispatchSkipped{
+			reason: formatAdmissionReason(ap, "workspace fail-closed: no accountable human for autopilot run"),
+			code:   dispatch.ReasonAttributionBlocked,
+		}
+	}
+	return result, nil
+}
+
+// dispatchMessage runs a message-mode autopilot inside the recipient's existing
+// Feishu p2p conversation. The report becomes a normal assistant chat message,
+// so it shares the conversation's history and the member can follow up on it.
+//
+// A recipient with no bound p2p conversation falls back to the run_only task
+// path; SyncRunFromTask turns that task's output into a deduplicated inbox
+// notification instead of inventing an undeliverable chat session.
+func (s *AutopilotService) dispatchMessage(ctx context.Context, ap db.Autopilot, run *db.AutopilotRun, actorUserID pgtype.UUID) error {
+	agent, _, err := s.resolveAutopilotLeader(ctx, ap)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errSquadArchived) {
+			return &errDispatchSkipped{reason: formatAdmissionReason(ap, "assignee no longer resolvable"), code: dispatch.ReasonTargetUnavailable}
+		}
+		return fmt.Errorf("resolve leader: %w", err)
+	}
+	verdict, err := AgentReadiness(ctx, s.runtimeLookup(), agent)
+	if err != nil {
+		return fmt.Errorf("check agent readiness: %w", err)
+	}
+	if !verdict.Ready() {
+		return &errDispatchSkipped{reason: formatAdmissionReason(ap, verdict.Detail), code: verdict.Reason}
+	}
+	if ap.AssigneeType == "squad" && !s.autopilotAdmitInvoke(ctx, ap, agent, actorUserID, run.TriggerID) {
+		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "not allowed to invoke private squad leader"), code: dispatch.ReasonInvocationNotAllowed}
+	}
+
+	recipient, ok, err := ResolveAutopilotNotificationRecipient(ctx, s.Queries, ap)
+	if err != nil {
+		return fmt.Errorf("resolve message recipient: %w", err)
+	}
+	if !ok || recipient.Type != "member" {
+		return &errDispatchSkipped{reason: "autopilot message recipient is not a workspace member", code: dispatch.ReasonTargetUnavailable}
+	}
+
+	binding, err := s.Queries.GetLarkP2PChatSessionBindingForMember(ctx, db.GetLarkP2PChatSessionBindingForMemberParams{
+		WorkspaceID: ap.WorkspaceID,
+		AgentID:     agent.ID,
+		CreatorID:   recipient.ID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No bound conversation: deliver through the normal autopilot task path
+		// and let the completion listener write the inbox fallback.
+		return s.dispatchRunOnly(ctx, ap, run, actorUserID)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve lark p2p conversation: %w", err)
+	}
+
+	autopilotAttr, err := s.autopilotTaskAttribution(ctx, ap, run, agent, actorUserID)
+	if err != nil {
+		return err
+	}
+	apSource, _, apEvidenceKind, apEvidenceRef := attributionCreateParams(autopilotAttr)
+
+	triggerTimezone := s.resolveAutopilotTriggerTimezone(ctx, run.TriggerID)
+	kickoff := s.buildMessageKickoff(ap, *run, triggerTimezone)
+
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin message dispatch: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	lockedRun, err := qtx.LockAutopilotRunForDispatch(ctx, run.ID)
+	if err != nil {
+		return fmt.Errorf("lock autopilot run for message dispatch: %w", err)
+	}
+	if lockedRun.TaskID.Valid {
+		// Another caller already created the report task. Keep the caller's
+		// snapshot current and let it publish the normal run-start signal.
+		*run = lockedRun
+		return nil
+	}
+
+	task, err := qtx.CreateAutopilotChatTask(ctx, db.CreateAutopilotChatTaskParams{
+		ID:             dbid.NewV7(),
+		AgentID:        agent.ID,
+		RuntimeID:      agent.RuntimeID,
+		Priority:       2,
+		ChatSessionID:  binding.ChatSessionID,
+		AutopilotRunID: run.ID,
+		TriggerSummary: pgtype.Text{
+			String: truncateForSummary(ap.Title, triggerSummaryMaxLen),
+			Valid:  ap.Title != "",
+		},
+		InitiatorUserID:      recipient.ID,
+		OriginatorUserID:     autopilotAttr.UserID,
+		AccountableUserID:    autopilotAttr.AccountableUserID,
+		RuleVersionID:        autopilotAttr.RuleVersionID,
+		OriginatorSource:     apSource,
+		TriggerEvidenceKind:  apEvidenceKind,
+		TriggerEvidenceRefID: apEvidenceRef,
+	})
+	if err != nil {
+		return fmt.Errorf("create autopilot chat task: %w", err)
+	}
+
+	task, err = qtx.SetChatTaskInputOwnerSelf(ctx, task.ID)
+	if err != nil {
+		return fmt.Errorf("own autopilot chat input: %w", err)
+	}
+
+	if _, err := qtx.CreateChatMessage(ctx, db.CreateChatMessageParams{
+		ChatSessionID: binding.ChatSessionID,
+		Role:          "user",
+		Content:       kickoff,
+		TaskID:        task.ID,
+		MessageKind:   pgtype.Text{String: protocol.ChatMessageKindAutopilotKickoff, Valid: true},
+	}); err != nil {
+		return fmt.Errorf("write autopilot kickoff message: %w", err)
+	}
+
+	if _, err := qtx.CreateAutopilotChatTaskDelivery(ctx, db.CreateAutopilotChatTaskDeliveryParams{
+		TaskID:    task.ID,
+		BindingID: binding.ID,
+	}); err != nil {
+		return fmt.Errorf("snapshot autopilot chat delivery: %w", err)
+	}
+
+	updatedRun, err := qtx.UpdateAutopilotRunRunning(ctx, db.UpdateAutopilotRunRunningParams{
+		ID:     run.ID,
+		TaskID: task.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("link autopilot chat task: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit message dispatch: %w", err)
+	}
+	*run = updatedRun
+
+	s.TaskSvc.NotifyTaskEnqueued(ctx, task)
+	slog.Info("autopilot dispatched",
+		"autopilot_id", util.UUIDToString(ap.ID),
+		"execution_mode", ap.ExecutionMode,
+		"task_id", util.UUIDToString(task.ID),
+		"run_id", util.UUIDToString(run.ID),
+		"chat_session_id", util.UUIDToString(binding.ChatSessionID),
+	)
+	return nil
+}
+
+// buildMessageKickoff renders the hidden user turn that starts a message-mode
+// run. It carries the autopilot instructions because a chat task's prompt is
+// built from chat input, not from AutopilotDescription.
+func (s *AutopilotService) buildMessageKickoff(ap db.Autopilot, run db.AutopilotRun, triggerTimezone string) string {
+	var b strings.Builder
+	b.WriteString("An Autopilot run has started in this conversation. ")
+	b.WriteString("Do not create a Multica issue and do not post an issue comment: write the result as a normal assistant reply so the member can read and follow up on it here.\n\n")
+	fmt.Fprintf(&b, "Autopilot: %s\n", ap.Title)
+	fmt.Fprintf(&b, "Triggered at: %s\n", formatAutopilotRunTimestamp(run, triggerTimezone))
+	if run.Source != "" {
+		fmt.Fprintf(&b, "Trigger source: %s\n", run.Source)
+	}
+	if run.Source == "webhook" && len(run.TriggerPayload) > 0 {
+		payload := run.TriggerPayload
+		if pretty, err := prettifyJSON(payload); err == nil {
+			payload = pretty
+		}
+		b.WriteString("\nWebhook payload:\n```json\n")
+		b.Write(payload)
+		b.WriteString("\n```\n")
+	}
+	b.WriteString("\nInstructions:\n")
+	if strings.TrimSpace(ap.Description.String) != "" {
+		b.WriteString(ap.Description.String)
+	} else {
+		b.WriteString(ap.Title)
+	}
+	b.WriteString("\n\nReturn the finished report as your reply.")
+	return b.String()
 }
 
 // SyncRunFromIssue updates the autopilot run when its linked issue reaches a terminal status.
@@ -1154,9 +1370,30 @@ func (s *AutopilotService) SyncRunFromTask(ctx context.Context, task db.AgentTas
 
 	switch task.Status {
 	case "completed":
+		result := task.Result
+		if autopilot.ExecutionMode == "message" {
+			result, err = s.messageRunResult(ctx, autopilot, run, task)
+			if err != nil {
+				// The agent finished, but the report has nowhere to go. Surface
+				// that as a failed run instead of completing silently.
+				reason := "message delivery failed: " + err.Error()
+				updatedRun, failErr := s.failAutopilotRun(ctx, db.UpdateAutopilotRunFailedParams{
+					ID:            run.ID,
+					FailureReason: pgtype.Text{String: reason, Valid: true},
+				})
+				if failErr != nil {
+					slog.Warn("failed to mark message run failed after delivery error",
+						"run_id", util.UUIDToString(run.ID), "error", failErr)
+					return
+				}
+				s.captureAutopilotRunFailed(autopilot, updatedRun, updatedRun.Source, reason)
+				s.publishRunDone(wsID, updatedRun, "failed")
+				return
+			}
+		}
 		updatedRun, err := s.completeAutopilotRun(ctx, db.UpdateAutopilotRunCompletedParams{
 			ID:     run.ID,
-			Result: task.Result,
+			Result: result,
 		})
 		if err != nil {
 			slog.Warn("failed to complete autopilot run from task", "run_id", util.UUIDToString(run.ID), "error", err)
@@ -1180,6 +1417,117 @@ func (s *AutopilotService) SyncRunFromTask(ctx context.Context, task db.AgentTas
 		s.captureAutopilotRunFailed(autopilot, updatedRun, updatedRun.Source, reason)
 		s.publishRunDone(wsID, updatedRun, "failed")
 	}
+}
+
+// messageRunResult records where a completed message-mode report landed. A
+// bound conversation already holds the assistant message; a recipient with no
+// binding gets a deduplicated inbox notification built from the task output.
+func (s *AutopilotService) messageRunResult(ctx context.Context, ap db.Autopilot, run db.AutopilotRun, task db.AgentTaskQueue) ([]byte, error) {
+	if task.ChatSessionID.Valid {
+		msg, err := s.Queries.GetChatMessageByTaskAssistant(ctx, task.ID)
+		if err != nil {
+			slog.Warn("message autopilot: assistant reply lookup failed; keeping task result",
+				"run_id", util.UUIDToString(run.ID),
+				"task_id", util.UUIDToString(task.ID),
+				"error", err,
+			)
+			return task.Result, nil
+		}
+		result, err := json.Marshal(map[string]string{
+			"chat_session_id": util.UUIDToString(task.ChatSessionID),
+			"message_id":      util.UUIDToString(msg.ID),
+		})
+		if err != nil {
+			slog.Warn("message autopilot: encode chat result failed",
+				"run_id", util.UUIDToString(run.ID), "error", err)
+			return task.Result, nil
+		}
+		return result, nil
+	}
+	return s.deliverMessageFallback(ctx, ap, run, task)
+}
+
+// deliverMessageFallback writes the inbox notification for a message-mode run
+// whose recipient has no bound conversation. The dedupe key is scoped to the
+// run, so a retried completion or replayed task event cannot create a second
+// notification.
+func (s *AutopilotService) deliverMessageFallback(ctx context.Context, ap db.Autopilot, run db.AutopilotRun, task db.AgentTaskQueue) ([]byte, error) {
+	recipient, ok, err := ResolveAutopilotNotificationRecipient(ctx, s.Queries, ap)
+	if err != nil {
+		return nil, fmt.Errorf("resolve fallback recipient: %w", err)
+	}
+	if !ok || recipient.Type != "member" {
+		return nil, fmt.Errorf("fallback recipient is not a workspace member")
+	}
+
+	body := autopilotTaskOutput(task.Result)
+	if strings.TrimSpace(body) == "" {
+		body = "The autopilot run finished without a report."
+	}
+	details, _ := json.Marshal(map[string]string{
+		"autopilot_id":     util.UUIDToString(ap.ID),
+		"autopilot_run_id": util.UUIDToString(run.ID),
+		"task_id":          util.UUIDToString(task.ID),
+	})
+	item, err := s.Queries.CreateAutopilotReportInboxItem(ctx, db.CreateAutopilotReportInboxItemParams{
+		ID:          dbid.NewV7(),
+		WorkspaceID: ap.WorkspaceID,
+		RecipientID: recipient.ID,
+		Title:       ap.Title,
+		Body:        pgtype.Text{String: redact.Text(body), Valid: true},
+		ActorID:     task.AgentID,
+		Details:     details,
+		DedupeKey:   pgtype.Text{String: "autopilot_report:" + util.UUIDToString(run.ID), Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("write fallback inbox item: %w", err)
+	}
+
+	s.publishAutopilotReportInbox(item)
+	result, err := json.Marshal(map[string]string{"inbox_item_id": util.UUIDToString(item.ID)})
+	if err != nil {
+		return nil, fmt.Errorf("encode fallback result: %w", err)
+	}
+	return result, nil
+}
+
+// autopilotTaskOutput extracts the agent's final text from a completed task.
+func autopilotTaskOutput(result []byte) string {
+	var payload protocol.TaskCompletedPayload
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return ""
+	}
+	return util.UnescapeBackslashEscapes(payload.Output)
+}
+
+func (s *AutopilotService) publishAutopilotReportInbox(item db.InboxItem) {
+	s.Bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: util.UUIDToString(item.WorkspaceID),
+		ActorType:   "agent",
+		ActorID:     util.UUIDToString(item.ActorID),
+		Payload: map[string]any{
+			"item": map[string]any{
+				"id":              util.UUIDToString(item.ID),
+				"workspace_id":    util.UUIDToString(item.WorkspaceID),
+				"recipient_type":  item.RecipientType,
+				"recipient_id":    util.UUIDToString(item.RecipientID),
+				"type":            item.Type,
+				"severity":        item.Severity,
+				"issue_id":        util.UUIDToPtr(item.IssueID),
+				"title":           item.Title,
+				"body":            util.TextToPtr(item.Body),
+				"read":            item.Read,
+				"archived":        item.Archived,
+				"created_at":      util.TimestampToString(item.CreatedAt),
+				"actor_type":      util.TextToPtr(item.ActorType),
+				"actor_id":        util.UUIDToPtr(item.ActorID),
+				"details":         json.RawMessage(item.Details),
+				"chat_session_id": util.UUIDToPtr(item.ChatSessionID),
+				"chat_message_id": util.UUIDToPtr(item.ChatMessageID),
+			},
+		},
+	})
 }
 
 // SyncRunFromLinkedIssueTask fails a create_issue autopilot run when its

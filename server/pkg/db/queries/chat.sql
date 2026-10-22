@@ -35,6 +35,7 @@ WHERE cs.id = $1
       SELECT 1 FROM chat_message AS public_message
       WHERE public_message.chat_session_id = cs.id
         AND public_message.message_kind != 'channel_command'
+        AND public_message.message_kind != 'autopilot_kickoff'
     )
   );
 
@@ -57,7 +58,7 @@ LEFT JOIN LATERAL (
   SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
-     AND m.message_kind != 'channel_command'
+     AND m.message_kind NOT IN ('channel_command', 'autopilot_kickoff')
    ORDER BY m.created_at DESC
    LIMIT 1
 ) lm ON true
@@ -94,7 +95,7 @@ LEFT JOIN LATERAL (
   SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
-     AND m.message_kind != 'channel_command'
+     AND m.message_kind NOT IN ('channel_command', 'autopilot_kickoff')
    ORDER BY m.created_at DESC
    LIMIT 1
 ) lm ON true
@@ -187,6 +188,7 @@ WHERE session.id = @id
     WHERE message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
 RETURNING *;
 
@@ -204,6 +206,7 @@ WHERE session.id = @id
     WHERE message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
 RETURNING *;
 
@@ -218,12 +221,14 @@ WHERE session.id = @id
       AND message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
   AND NOT EXISTS (
     SELECT 1 FROM chat_message AS other_message
     WHERE other_message.chat_session_id = session.id
       AND other_message.role = 'user'
       AND other_message.message_kind != 'channel_command'
+      AND other_message.message_kind != 'autopilot_kickoff'
       AND other_message.id != @message_id
   )
 RETURNING *;
@@ -837,6 +842,7 @@ WHERE task_id = $1
 SELECT message.* FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
+  AND message.message_kind != 'autopilot_kickoff'
   AND NOT (
     message.role = 'user'
     AND EXISTS (
@@ -1086,6 +1092,7 @@ WHERE queued_input.chat_session_id = $1
 SELECT message.* FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
+  AND message.message_kind != 'autopilot_kickoff'
   AND NOT (
     message.role = 'user'
     AND EXISTS (
@@ -1507,7 +1514,9 @@ WHERE id = $1;
 -- instead of repeating the introduction every turn (MUL-4259).
 SELECT EXISTS (
     SELECT 1 FROM chat_message
-    WHERE chat_session_id = $1 AND role = 'user'
+    WHERE chat_session_id = $1
+      AND role = 'user'
+      AND message_kind != 'autopilot_kickoff'
 ) AS has_user_message;
 
 -- name: ChatSessionHasPublicUserMessage :one
@@ -1516,6 +1525,7 @@ SELECT EXISTS (
     WHERE chat_session_id = $1
       AND role = 'user'
       AND message_kind != 'channel_command'
+      AND message_kind != 'autopilot_kickoff'
 ) AS has_public_user_message;
 
 -- name: CreateChatDraftRestore :one

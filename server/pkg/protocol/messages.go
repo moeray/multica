@@ -276,6 +276,16 @@ const (
 	// the opening self-describes: chat renders the starter cards under this
 	// kind instead of quick-action chips (MUL-5765).
 	ChatMessageKindOnboardingOpening = "onboarding_opening"
+	// ChatMessageKindAutopilotKickoff is the hidden server-authored user turn
+	// that starts a message-mode autopilot run inside an existing chat. It is
+	// persisted so the runtime receives a normal immutable input batch, but UI
+	// projections filter it out: it is not the member's message, must not
+	// affect unread counts, and must not become the chat-list preview.
+	ChatMessageKindAutopilotKickoff = "autopilot_kickoff"
+	// ChatMessageKindAgentReport marks an assistant reply produced by a
+	// message-mode autopilot run. It renders like an ordinary reply and stays
+	// in the transcript so the member can follow up on it.
+	ChatMessageKindAgentReport = "agent_report"
 )
 
 // ChatDonePayload is broadcast when an agent finishes responding to a chat

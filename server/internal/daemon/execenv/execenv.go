@@ -193,6 +193,7 @@ type TaskContextForEnv struct {
 	AutopilotTitle          string
 	AutopilotDescription    string
 	AutopilotSource         string
+	AutopilotExecutionMode  string
 	AutopilotTriggerPayload string
 	QuickCreatePrompt       string // non-empty for quick-create tasks
 	IsSquadLeader           bool   // true when THIS TASK runs the agent in the squad-leader role (may exit silently on no_action); derived from the claim's is_leader_task / squad_id, never sniffed from instructions text (MUL-5811)

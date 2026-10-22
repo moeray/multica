@@ -32,7 +32,8 @@
   },
   "execution_mode": {
     "create_issue": "태스크 생성",
-    "run_only": "실행만"
+    "run_only": "실행만",
+    "message": "메시지"
   },
   "relative_date": {
     "today": "오늘",
@@ -339,6 +340,10 @@
       "run_only": {
         "label": "실행만",
         "description": "태스크를 만들지 않고 조용히 실행합니다"
+      },
+      "message": {
+        "label": "메시지",
+        "description": "각 실행 결과를 에이전트 채팅으로 보냅니다"
       }
     }
   },

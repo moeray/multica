@@ -17,11 +17,16 @@ export interface ChatPinnedAgent {
  * - "onboarding_opening" — Mika's reply to the kickoff; chat renders the
  *   onboarding starter cards under it instead of quick-action chips.
  */
+// autopilot_kickoff is a hidden server-authored input; agent_report is the
+// assistant reply it produces. Both are additive kinds: older readers degrade
+// unknown values to "message".
 export type ChatMessageKind =
   | "message"
   | "no_response"
   | "onboarding_kickoff"
-  | "onboarding_opening";
+  | "onboarding_opening"
+  | "autopilot_kickoff"
+  | "agent_report";
 
 /**
  * A concise follow-up offered by an assistant reply. `label` is rendered in

@@ -134,6 +134,7 @@
     "quick_create_failed": "Create with agent failed",
     "quick_create_unconfirmed": "Create with agent unconfirmed",
     "autopilot_paused": "Autopilot paused",
+    "agent_message": "Agent message",
     "children_done": "Sub-issues finished",
     "autopilot_quota_exceeded": "Autopilot run limit reached"
   },

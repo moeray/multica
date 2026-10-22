@@ -678,6 +678,49 @@ func (q *Queries) CopyChannelTaskDelivery(ctx context.Context, arg CopyChannelTa
 	return err
 }
 
+const createAutopilotChatTaskDelivery = `-- name: CreateAutopilotChatTaskDelivery :one
+INSERT INTO channel_task_delivery (
+    task_id, binding_id, installation_id, channel_type, channel_chat_id, chat_type,
+    channel_message_id, channel_thread_id, channel_sender_id, route_revision, config
+)
+SELECT
+    $1, binding.id, binding.installation_id, binding.channel_type,
+    binding.channel_chat_id, binding.chat_type,
+    NULL, NULL, NULL, binding.route_revision, binding.config
+FROM channel_chat_session_binding AS binding
+WHERE binding.id = $2
+  AND binding.retired_at IS NULL
+RETURNING task_id, binding_id, installation_id, channel_type, channel_chat_id, chat_type, channel_message_id, channel_thread_id, route_revision, config, created_at, channel_sender_id
+`
+
+type CreateAutopilotChatTaskDeliveryParams struct {
+	TaskID    pgtype.UUID `json:"task_id"`
+	BindingID pgtype.UUID `json:"binding_id"`
+}
+
+// Freezes the outbound route for an autopilot message task. Unlike an inbound
+// channel turn there is no trigger message or context generation to copy: the
+// report is a new standalone message in the existing conversation.
+func (q *Queries) CreateAutopilotChatTaskDelivery(ctx context.Context, arg CreateAutopilotChatTaskDeliveryParams) (ChannelTaskDelivery, error) {
+	row := q.db.QueryRow(ctx, createAutopilotChatTaskDelivery, arg.TaskID, arg.BindingID)
+	var i ChannelTaskDelivery
+	err := row.Scan(
+		&i.TaskID,
+		&i.BindingID,
+		&i.InstallationID,
+		&i.ChannelType,
+		&i.ChannelChatID,
+		&i.ChatType,
+		&i.ChannelMessageID,
+		&i.ChannelThreadID,
+		&i.RouteRevision,
+		&i.Config,
+		&i.CreatedAt,
+		&i.ChannelSenderID,
+	)
+	return i, err
+}
+
 const createChannelBindingToken = `-- name: CreateChannelBindingToken :one
 
 INSERT INTO channel_binding_token (
@@ -2065,6 +2108,59 @@ func (q *Queries) GetChannelUserBindingByUserID(ctx context.Context, arg GetChan
 		&i.ChannelUserID,
 		&i.Config,
 		&i.BoundAt,
+	)
+	return i, err
+}
+
+const getLarkP2PChatSessionBindingForMember = `-- name: GetLarkP2PChatSessionBindingForMember :one
+SELECT binding.id, binding.chat_session_id, binding.installation_id, binding.channel_type, binding.channel_chat_id, binding.chat_type, binding.last_message_id, binding.last_thread_id, binding.config, binding.created_at, binding.pending_fresh, binding.context_revision, binding.route_revision, binding.retired_at, binding.history_start_message_id, binding.history_end_message_id, binding.history_boundary_pending
+FROM channel_chat_session_binding AS binding
+JOIN chat_session AS session ON session.id = binding.chat_session_id
+JOIN channel_installation AS installation ON installation.id = binding.installation_id
+WHERE installation.workspace_id = $1
+  AND installation.agent_id = $2
+  AND installation.channel_type = 'feishu'
+  AND installation.status = 'active'
+  AND binding.channel_type = 'feishu'
+  AND binding.chat_type = 'p2p'
+  AND binding.retired_at IS NULL
+  AND session.creator_id = $3
+  AND session.status = 'active'
+ORDER BY binding.created_at DESC, binding.id DESC
+LIMIT 1
+`
+
+type GetLarkP2PChatSessionBindingForMemberParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+	CreatorID   pgtype.UUID `json:"creator_id"`
+}
+
+// Resolves the existing Feishu p2p conversation between an agent and a member.
+// p2p sessions are created with the member as creator (the sole human), which
+// is the only stable link from a Multica member to the platform chat id: the
+// chat id itself is opaque and cannot be derived from an open_id.
+func (q *Queries) GetLarkP2PChatSessionBindingForMember(ctx context.Context, arg GetLarkP2PChatSessionBindingForMemberParams) (ChannelChatSessionBinding, error) {
+	row := q.db.QueryRow(ctx, getLarkP2PChatSessionBindingForMember, arg.WorkspaceID, arg.AgentID, arg.CreatorID)
+	var i ChannelChatSessionBinding
+	err := row.Scan(
+		&i.ID,
+		&i.ChatSessionID,
+		&i.InstallationID,
+		&i.ChannelType,
+		&i.ChannelChatID,
+		&i.ChatType,
+		&i.LastMessageID,
+		&i.LastThreadID,
+		&i.Config,
+		&i.CreatedAt,
+		&i.PendingFresh,
+		&i.ContextRevision,
+		&i.RouteRevision,
+		&i.RetiredAt,
+		&i.HistoryStartMessageID,
+		&i.HistoryEndMessageID,
+		&i.HistoryBoundaryPending,
 	)
 	return i, err
 }

@@ -235,4 +235,22 @@ describe("AutopilotDialog project section", () => {
       project_id: "proj-1",
     });
   });
+
+  it("offers message mode and saves it", async () => {
+    const user = userEvent.setup();
+    renderCreateDialog();
+
+    await user.type(screen.getByLabelText("title"), "Daily report");
+    const messageOption = screen
+      .getByText("Send each run's result into the agent's chat")
+      .closest("button");
+    expect(messageOption).not.toBeNull();
+    await user.click(messageOption!);
+    await user.click(screen.getByRole("button", { name: "Create autopilot" }));
+
+    await waitFor(() => expect(mockCreateAutopilot).toHaveBeenCalledTimes(1));
+    expect(mockCreateAutopilot.mock.calls[0]?.[0]).toMatchObject({
+      execution_mode: "message",
+    });
+  });
 });

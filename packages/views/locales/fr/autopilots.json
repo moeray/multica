@@ -32,7 +32,8 @@
   },
   "execution_mode": {
     "create_issue": "Créer une tâche",
-    "run_only": "Exécution seule"
+    "run_only": "Exécution seule",
+    "message": "Message"
   },
   "relative_date": {
     "today": "Aujourd'hui",
@@ -339,6 +340,10 @@
       "run_only": {
         "label": "Exécution seule",
         "description": "Exécution silencieuse, aucune tâche créée"
+      },
+      "message": {
+        "label": "Message",
+        "description": "Envoyer le résultat de chaque exécution dans la conversation de l'agent"
       }
     }
   },

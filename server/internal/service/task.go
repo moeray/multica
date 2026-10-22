@@ -4736,7 +4736,12 @@ func (s *TaskService) writeChatCompletionOutcome(ctx context.Context, qtx *db.Qu
 		if err != nil {
 			return nil, fmt.Errorf("check onboarding kickoff input: %w", err)
 		}
-		if openingOnly.Bool {
+		if task.AutopilotRunID.Valid {
+			// Message-mode autopilot replies are ordinary assistant turns, but
+			// the kind lets clients fold/filter scheduled reports and lets the
+			// run's result point at the row.
+			params.MessageKind = pgtype.Text{String: protocol.ChatMessageKindAgentReport, Valid: true}
+		} else if openingOnly.Bool {
 			params.MessageKind = pgtype.Text{String: protocol.ChatMessageKindOnboardingOpening, Valid: true}
 		}
 	case pendingAttachments > 0:
