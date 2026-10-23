@@ -87,6 +87,47 @@ func TestArchivingAChannelBoundChatSessionCancelsItsQueuedTasks(t *testing.T) {
 	}
 }
 
+// TestArchivingAHistoryOnlyChatSessionCancelsItsQueuedTasks covers the route
+// left behind after a binding switch: the session keeps only retired bindings,
+// but an in-flight task can still be running on that old route. The archive
+// path must still recognize it as channel-backed, cancel the task, and let the
+// existing delete prune the route history.
+func TestArchivingAHistoryOnlyChatSessionCancelsItsQueuedTasks(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	f := newArchiveCancelFixture(t, "Archive Cancels History Only")
+	f.bindToChannel(t, "GROUP_ARCHIVE_HISTORY_ONLY")
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE channel_chat_session_binding SET retired_at = now() WHERE chat_session_id = $1
+	`, f.sessionID); err != nil {
+		t.Fatalf("retire binding: %v", err)
+	}
+
+	f.archive(t)
+
+	for _, tc := range []struct{ label, id string }{
+		{"queued", f.queuedTaskID},
+		{"running", f.runningTaskID},
+	} {
+		if status := f.taskStatus(t, tc.id); status != "cancelled" {
+			t.Fatalf("%s task status after archiving a history-only channel session = %q, want cancelled", tc.label, status)
+		}
+	}
+	if f.bindingExists(t) {
+		t.Errorf("archived session kept its retired channel binding history")
+	}
+	if agentStatus := f.agentStatus(t); agentStatus != "idle" {
+		t.Errorf("agent status after archiving its only conversation = %q, want idle", agentStatus)
+	}
+	if seen := f.drainCancelledEvents(); len(seen) != 2 {
+		t.Errorf("task:cancelled emitted for %d of 2 tasks", len(seen))
+	}
+	if live := f.liveTaskTokens(t); live != 0 {
+		t.Errorf("cancelled task still has %d live task token(s)", live)
+	}
+}
+
 // TestArchivingAWebOnlyChatSessionLeavesItsTasksRunning is the other direction:
 // the same fixture with no channel binding. Archive is the reversible
 // organizing action the UI presents — the row offers Stop OR Archive, never
@@ -529,6 +570,22 @@ func TestNoHistoryNoteNamesTheActualChannel(t *testing.T) {
 	}
 	if body.ChannelType != "wecom" {
 		t.Errorf("channel_type = %q, want wecom", body.ChannelType)
+	}
+
+	// A route switch leaves the source session with only a retired binding. It
+	// is still a channel conversation for history purposes: answering with the
+	// web-only note would tell the agent it is in a private chat.
+	if _, err := testPool.Exec(ctx, `
+		UPDATE channel_chat_session_binding SET retired_at = now() WHERE chat_session_id = $1
+	`, sessionID); err != nil {
+		t.Fatalf("retire binding: %v", err)
+	}
+	body = readNoHistoryResponse(t, sessionID)
+	if body.ChannelType != "wecom" {
+		t.Errorf("history-only session channel_type = %q, want wecom", body.ChannelType)
+	}
+	if strings.Contains(body.Note, "not connected to a chat channel") {
+		t.Errorf("a history-only WeCom session was told it is not on a channel: %q", body.Note)
 	}
 
 	// A binding read that fails for any reason other than "no such row" leaves

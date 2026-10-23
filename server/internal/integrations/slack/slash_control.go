@@ -103,8 +103,9 @@ func (s *slackDMControlStarter) StartSlackDMChat(ctx context.Context, inst engin
 		s.lifecycle.ChannelChatStarted(engine.ChannelChatStartedEvent{
 			WorkspaceID: inst.WorkspaceID, CreatorID: userID, AgentID: inst.AgentID,
 			SessionID: started.SessionID, InstallationID: inst.ID,
-			ChannelType: TypeSlack, RouteRevision: started.RouteRevision,
-			Title: started.Append.InitialTitle,
+			ChannelType: TypeSlack, ChatType: channel.ChatTypeP2P,
+			RouteRevision: started.RouteRevision,
+			Title:         started.Append.InitialTitle,
 		})
 		if started.Append.InitialTitle != "" {
 			s.lifecycle.GenerateChannelChatTitle(inst.WorkspaceID, userID, started.SessionID, started.Append.InitialTitle, body)

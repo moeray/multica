@@ -300,6 +300,42 @@ describe("applyChatSessionUpdatedToCache", () => {
     expect(row.unread_count).toBe(2);
     expect(row.has_unread).toBe(true);
   });
+
+  it("patches channel route metadata after a binding switch", () => {
+    const qc = createQueryClient();
+    qc.setQueryData<ChatSession[]>(chatKeys.sessions(WS_ID), [
+      makeSession({
+        channel_source: {
+          channel_type: "feishu",
+          installation_id: "installation-1",
+          channel_chat_id: "chat-1",
+          route_revision: 1,
+        },
+        is_current_channel_route: true,
+      }),
+    ]);
+
+    applyChatSessionUpdatedToCache(qc, WS_ID, {
+      chat_session_id: "s1",
+      channel_source: {
+        channel_type: "feishu",
+        installation_id: "installation-1",
+        channel_chat_id: "chat-1",
+        route_revision: 2,
+      },
+      is_current_channel_route: false,
+      updated_at: "2026-07-10T03:00:00Z",
+    });
+
+    const row = qc.getQueryData<ChatSession[]>(chatKeys.sessions(WS_ID))![0]!;
+    expect(row.channel_source).toEqual({
+      channel_type: "feishu",
+      installation_id: "installation-1",
+      channel_chat_id: "chat-1",
+      route_revision: 2,
+    });
+    expect(row.is_current_channel_route).toBe(false);
+  });
 });
 
 describe("invalidateChatMessageQueries", () => {

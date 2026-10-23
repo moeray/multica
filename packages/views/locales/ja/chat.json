@@ -241,6 +241,27 @@
     "archived_title": "アーカイブ済み",
     "row_actions_aria": "チャットの操作"
   },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "現在",
+    "historical": "履歴",
+    "current_binding": "現在の連携",
+    "historical_session": "過去のセッション",
+    "change_binding": "紐付け先を変更",
+    "binding_dialog": {
+      "description": "新しい Feishu メッセージは選択したチャットに届きます。現在のチャットは履歴として残り、実行中の返信は元のルートを維持します。",
+      "list_aria": "このエージェントのアクティブなチャット",
+      "conflict": "連携済み",
+      "empty": "このエージェントに他のアクティブなチャットはありません。",
+      "cancel": "キャンセル",
+      "confirm": "紐付けを切り替える",
+      "switching": "切り替え中...",
+      "conflict_error": "このチャットにはすでに有効な連携があるか、Feishu のルートが変更されました。もう一度お試しください。",
+      "forbidden_error": "この Feishu 連携は変更できません。",
+      "not_found_error": "このチャットは利用できなくなりました。",
+      "generic_error": "紐付けを変更できませんでした。もう一度お試しください。"
+    }
+  },
   "header": {
     "view_profile": "Agent のプロフィール",
     "rename": "名前を変更",

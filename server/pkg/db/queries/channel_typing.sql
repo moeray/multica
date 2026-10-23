@@ -86,7 +86,7 @@ WHERE cutoff.id = @through_message_id AND cutoff.chat_session_id = @chat_session
  AND installation.id = @installation_id AND installation.workspace_id = @workspace_id
  AND installation.channel_type = 'feishu'
  AND EXISTS (SELECT 1 FROM channel_chat_session_binding b WHERE b.chat_session_id = session.id
-  AND b.installation_id = installation.id AND b.channel_type = 'feishu')
+  AND b.installation_id = installation.id AND b.channel_type = 'feishu' AND b.retired_at IS NULL)
  AND message.chat_session_id = session.id AND message.task_id IS NULL
  AND message.channel_ingested AND message.role = 'user'
  AND COALESCE(message.channel_context_revision, 1) = @context_revision

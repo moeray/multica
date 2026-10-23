@@ -37,6 +37,269 @@ type CreateChatSessionRequest struct {
 	ProjectID *string `json:"project_id"`
 }
 
+type SwitchChatSessionChannelBindingRequest struct {
+	InstallationID string `json:"installation_id"`
+	ChannelChatID  string `json:"channel_chat_id"`
+}
+
+// SwitchChatSessionChannelBinding moves a Feishu p2p chat's active route from
+// its current Chat to another existing Chat owned by the same agent. The old
+// binding is retired rather than deleted, so its transcript and any in-flight
+// delivery snapshot stay readable. The target keeps its title, messages, unread
+// state, and context generation; only the route that future Feishu messages use
+// changes.
+func (h *Handler) SwitchChatSessionChannelBinding(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	workspaceID := ctxWorkspaceID(r.Context())
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	if !ok {
+		return
+	}
+	targetID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "sessionId"), "chat session id")
+	if !ok {
+		return
+	}
+
+	var req SwitchChatSessionChannelBindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	installationID, ok := parseUUIDOrBadRequest(w, req.InstallationID, "installation_id")
+	if !ok {
+		return
+	}
+	channelChatID := strings.TrimSpace(req.ChannelChatID)
+	if channelChatID == "" {
+		writeError(w, http.StatusBadRequest, "channel_chat_id is required")
+		return
+	}
+
+	member, ok := h.workspaceMember(w, r, workspaceID)
+	if !ok {
+		return
+	}
+	target, err := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+		ID:          targetID,
+		WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	if target.Status != "active" {
+		writeError(w, http.StatusBadRequest, "chat session is archived")
+		return
+	}
+	// Command-only channel sessions are internal control-plane records, not
+	// public Chats. They must not become an interactive Feishu destination.
+	if _, err := h.Queries.GetPublicChatSessionInWorkspace(r.Context(), db.GetPublicChatSessionInWorkspaceParams{
+		ID:          target.ID,
+		WorkspaceID: workspaceUUID,
+	}); err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+
+	installation, err := h.Queries.GetChannelInstallationInWorkspace(r.Context(), db.GetChannelInstallationInWorkspaceParams{
+		ID:          installationID,
+		WorkspaceID: workspaceUUID,
+		ChannelType: "feishu",
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "channel installation not found")
+		return
+	}
+	if installation.Status != "active" {
+		writeError(w, http.StatusBadRequest, "channel installation is not active")
+		return
+	}
+	if installation.Purpose != "agent" {
+		writeError(w, http.StatusBadRequest, "channel installation is not an agent installation")
+		return
+	}
+	if installation.AgentID != target.AgentID {
+		writeError(w, http.StatusBadRequest, "channel installation and chat session use different agents")
+		return
+	}
+
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	// Read the route before taking the Chat locks only to discover which Chat is
+	// its current source. The locked re-read below is authoritative.
+	current, err := qtx.GetChannelChatSessionBinding(r.Context(), db.GetChannelChatSessionBindingParams{
+		InstallationID: installationID,
+		ChannelChatID:  channelChatID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "no active binding for this Feishu chat")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load Feishu binding")
+		return
+	}
+	source, err := qtx.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+		ID:          current.ChatSessionID,
+		WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusConflict, "Feishu binding changed; retry")
+		return
+	}
+	// The route belongs to the source Chat, not to whichever Chat the caller
+	// picked as its destination. Authorizing on the target alone lets a member
+	// who can create a Chat redirect someone else's Feishu conversation into it.
+	// A non-admin must own both ends; owners/admins may move any route.
+	if !roleAllowed(member.Role, "owner", "admin") &&
+		(uuidToString(source.CreatorID) != userID || uuidToString(target.CreatorID) != userID) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
+	// Serialize every route switch against appends, archives, deletions, and
+	// other switches. Sorting the two Chat ids prevents opposite-direction
+	// switches from deadlocking on each other.
+	first, second := source.ID, target.ID
+	if uuidToString(second) < uuidToString(first) {
+		first, second = second, first
+	}
+	if _, err := qtx.LockChatSessionForDelete(r.Context(), first); err != nil {
+		writeError(w, http.StatusConflict, "Feishu binding changed; retry")
+		return
+	}
+	if second != first {
+		if _, err := qtx.LockChatSessionForDelete(r.Context(), second); err != nil {
+			writeError(w, http.StatusConflict, "Feishu binding changed; retry")
+			return
+		}
+	}
+
+	// Re-read the target under the lock: an archive may have committed while the
+	// request was waiting.
+	target, err = qtx.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+		ID:          target.ID,
+		WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	if target.Status != "active" {
+		writeError(w, http.StatusBadRequest, "chat session is archived")
+		return
+	}
+
+	locked, err := qtx.LockCurrentChannelChatSessionBinding(r.Context(), db.LockCurrentChannelChatSessionBindingParams{
+		InstallationID: installationID,
+		ChannelChatID:  channelChatID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "Feishu binding changed; retry")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to lock Feishu binding")
+		return
+	}
+	if locked.ID != current.ID {
+		writeError(w, http.StatusConflict, "Feishu binding changed; retry")
+		return
+	}
+	if locked.ChannelType != "feishu" || locked.ChatType != "p2p" {
+		writeError(w, http.StatusBadRequest, "only Feishu p2p chats can switch bindings")
+		return
+	}
+
+	var (
+		targetBinding db.ChannelChatSessionBinding
+		alreadyBound  bool
+	)
+	targetBinding, err = qtx.LockCurrentChannelChatSessionBindingBySession(r.Context(), target.ID)
+	switch {
+	case err == nil:
+		if targetBinding.ID != locked.ID {
+			writeError(w, http.StatusConflict, "target chat session already has an active channel binding")
+			return
+		}
+		alreadyBound = true
+	case errors.Is(err, pgx.ErrNoRows):
+	default:
+		writeError(w, http.StatusInternalServerError, "failed to check target channel binding")
+		return
+	}
+
+	if !alreadyBound {
+		// Keep the target's current context generation so its transcript and
+		// provider resume pointer remain continuous. A web-only Chat has no
+		// generation yet; create revision 1 with an open boundary that the first
+		// inbound Feishu message resolves.
+		generation, generationErr := qtx.GetLatestChannelChatContextGeneration(r.Context(), target.ID)
+		if errors.Is(generationErr, pgx.ErrNoRows) {
+			generation, generationErr = qtx.CreateChannelChatContextGeneration(r.Context(), target.ID)
+		}
+		if generationErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to prepare target chat context")
+			return
+		}
+
+		if _, err := qtx.RetireChannelChatSessionBinding(r.Context(), db.RetireChannelChatSessionBindingParams{
+			ID:                  locked.ID,
+			HistoryEndMessageID: locked.LastMessageID,
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to retire current Feishu binding")
+			return
+		}
+		if _, err := qtx.CreateActiveChannelChatSessionBinding(r.Context(), db.CreateActiveChannelChatSessionBindingParams{
+			ChatSessionID:          target.ID,
+			InstallationID:         locked.InstallationID,
+			ChannelType:            locked.ChannelType,
+			ChannelChatID:          locked.ChannelChatID,
+			ChatType:               locked.ChatType,
+			Config:                 locked.Config,
+			ContextRevision:        generation.Revision,
+			HistoryStartMessageID:  generation.HistoryStartMessageID,
+			HistoryBoundaryPending: generation.HistoryBoundaryPending,
+		}); err != nil {
+			if isUniqueViolation(err) {
+				writeError(w, http.StatusConflict, "target chat session already has an active channel binding")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to install target Feishu binding")
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit Feishu binding switch")
+		return
+	}
+
+	responses := make([]ChatSessionResponse, 0, 2)
+	targetResponse := chatSessionToResponse(target)
+	responses = append(responses, targetResponse)
+	if source.ID != target.ID {
+		responses = append(responses, chatSessionToResponse(source))
+	}
+	if err := h.hydrateChatSessionChannelMetadata(r.Context(), responses); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat channel metadata")
+		return
+	}
+	for _, response := range responses {
+		h.publishChatSessionChannelMetadata(workspaceID, userID, response)
+	}
+	writeJSON(w, http.StatusOK, responses[0])
+}
+
 func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -1939,7 +2202,9 @@ type ChatSessionResponse struct {
 
 type ChatSessionChannelSourceResponse struct {
 	ChannelType    string `json:"channel_type"`
+	ChatType       string `json:"chat_type,omitempty"`
 	InstallationID string `json:"installation_id"`
+	ChannelChatID  string `json:"channel_chat_id"`
 	RouteRevision  int64  `json:"route_revision"`
 }
 
@@ -1957,7 +2222,11 @@ func (h *Handler) hydrateChatSessionChannelMetadata(ctx context.Context, session
 	}
 	bySession := make(map[string]db.ChannelChatSessionBinding, len(bindings))
 	for _, binding := range bindings {
-		bySession[uuidToString(binding.ChatSessionID)] = binding
+		sessionID := uuidToString(binding.ChatSessionID)
+		existing, ok := bySession[sessionID]
+		if !ok || channelBindingPreferred(binding, existing) {
+			bySession[sessionID] = binding
+		}
 	}
 	for i := range sessions {
 		binding, ok := bySession[sessions[i].ID]
@@ -1966,11 +2235,45 @@ func (h *Handler) hydrateChatSessionChannelMetadata(ctx context.Context, session
 		}
 		current := !binding.RetiredAt.Valid
 		sessions[i].ChannelSource = &ChatSessionChannelSourceResponse{
-			ChannelType: binding.ChannelType, InstallationID: uuidToString(binding.InstallationID), RouteRevision: binding.RouteRevision,
+			ChannelType: binding.ChannelType, ChatType: binding.ChatType,
+			InstallationID: uuidToString(binding.InstallationID),
+			ChannelChatID:  binding.ChannelChatID, RouteRevision: binding.RouteRevision,
 		}
 		sessions[i].IsCurrentChannelRoute = &current
 	}
 	return nil
+}
+
+// channelBindingPreferred picks the route that best describes a Chat's channel
+// source. An active binding always wins; otherwise the newest retired binding is
+// the most recent route the Chat used.
+func channelBindingPreferred(candidate, current db.ChannelChatSessionBinding) bool {
+	if candidate.RetiredAt.Valid != current.RetiredAt.Valid {
+		return !candidate.RetiredAt.Valid
+	}
+	if candidate.RouteRevision != current.RouteRevision {
+		return candidate.RouteRevision > current.RouteRevision
+	}
+	return candidate.CreatedAt.Time.After(current.CreatedAt.Time)
+}
+
+func (h *Handler) publishChatSessionChannelMetadata(workspaceID, userID string, response ChatSessionResponse) {
+	payload := protocol.ChatSessionUpdatedPayload{
+		ChatSessionID: response.ID,
+		Title:         response.Title,
+		UpdatedAt:     response.UpdatedAt,
+	}
+	if response.ChannelSource != nil {
+		payload.ChannelSource = &protocol.ChatSessionChannelSource{
+			ChannelType:    response.ChannelSource.ChannelType,
+			ChatType:       response.ChannelSource.ChatType,
+			InstallationID: response.ChannelSource.InstallationID,
+			ChannelChatID:  response.ChannelSource.ChannelChatID,
+			RouteRevision:  response.ChannelSource.RouteRevision,
+		}
+	}
+	payload.IsCurrentChannelRoute = response.IsCurrentChannelRoute
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, response.ID, payload)
 }
 
 // ChatLastMessage is a preview of a session's most recent message, used to

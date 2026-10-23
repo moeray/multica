@@ -241,6 +241,27 @@
     "archived_title": "보관됨",
     "row_actions_aria": "채팅 작업"
   },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "현재",
+    "historical": "이전",
+    "current_binding": "현재 연결",
+    "historical_session": "이전 세션",
+    "change_binding": "바인딩 채팅 변경",
+    "binding_dialog": {
+      "description": "새 Feishu 메시지는 선택한 채팅으로 전달됩니다. 현재 채팅은 기록으로 남고, 진행 중인 답장은 원래 경로를 유지합니다.",
+      "list_aria": "이 에이전트의 활성 채팅",
+      "conflict": "이미 바인딩됨",
+      "empty": "이 에이전트에 다른 활성 채팅이 없습니다.",
+      "cancel": "취소",
+      "confirm": "바인딩 전환",
+      "switching": "전환 중...",
+      "conflict_error": "해당 채팅에 이미 활성 바인딩이 있거나 Feishu 경로가 방금 변경되었습니다. 다시 시도하세요.",
+      "forbidden_error": "이 Feishu 바인딩을 변경할 수 없습니다.",
+      "not_found_error": "해당 채팅을 더 이상 사용할 수 없습니다.",
+      "generic_error": "바인딩을 변경하지 못했습니다. 다시 시도하세요."
+    }
+  },
   "header": {
     "view_profile": "Agent 프로필 보기",
     "rename": "이름 변경",

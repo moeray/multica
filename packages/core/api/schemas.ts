@@ -2161,7 +2161,9 @@ const ChatLastMessageSchema = z.object({
 
 const ChatChannelSourceSchema = z.object({
   channel_type: z.string().default(""),
+  chat_type: z.string().optional().catch(undefined),
   installation_id: z.string().default(""),
+  channel_chat_id: z.string().optional().catch(undefined),
   route_revision: z.number().default(0),
 }).loose();
 

@@ -122,14 +122,18 @@ describe("ChatSessionSchema", () => {
       ...baseSession,
       channel_source: {
         channel_type: "slack",
+        chat_type: "group",
         installation_id: "installation-1",
+        channel_chat_id: "C123:thread",
         route_revision: 3,
       },
       is_current_channel_route: false,
     });
     expect(parsed.channel_source).toEqual({
       channel_type: "slack",
+      chat_type: "group",
       installation_id: "installation-1",
+      channel_chat_id: "C123:thread",
       route_revision: 3,
     });
     expect(parsed.is_current_channel_route).toBe(false);
@@ -148,6 +152,23 @@ describe("ChatSessionSchema", () => {
     expect(parseWithFallback({ id: 42 }, ChatSessionSchema, EMPTY_CHAT_SESSION, {
       endpoint: "GET /api/chat/sessions/:id",
     })).toEqual(EMPTY_CHAT_SESSION);
+  });
+
+  it("keeps channel metadata compatible with older servers", () => {
+    const parsed = ChatSessionSchema.parse({
+      ...baseSession,
+      channel_source: {
+        channel_type: "feishu",
+        installation_id: "installation-1",
+        route_revision: 2,
+      },
+    });
+
+    expect(parsed.channel_source).toEqual({
+      channel_type: "feishu",
+      installation_id: "installation-1",
+      route_revision: 2,
+    });
   });
 
   it("drops one malformed list item without hiding the other Chats", () => {

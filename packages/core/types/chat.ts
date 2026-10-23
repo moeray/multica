@@ -84,7 +84,13 @@ export interface ChatLastMessage {
 
 export interface ChatChannelSource {
   channel_type: string;
+  /** "p2p" or "group" for platforms that expose the conversation shape.
+   *  Optional for older servers. */
+  chat_type?: string;
   installation_id: string;
+  /** The platform conversation this route delivers to. Optional for older
+   *  servers that only exposed the installation and revision. */
+  channel_chat_id?: string;
   route_revision: number;
 }
 
