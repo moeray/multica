@@ -1326,6 +1326,31 @@ describe("applyChatMessageToCache", () => {
     expect(qc.getQueryData<ChatMessage[]>(messagesKey)).toHaveLength(1);
   });
 
+  it("writes a server-authored review_result assistant message", () => {
+    const qc = createQueryClient();
+    qc.setQueryData<ChatMessage[]>(messagesKey, [userMessage()]);
+
+    applyChatMessageToCache(
+      qc,
+      messagePayload({
+        message_id: "msg-review",
+        role: "assistant",
+        content: "Review passed",
+        message_kind: "review_result",
+        actor_agent_id: "reviewer-1",
+        review_passed: true,
+      }),
+    );
+
+    expect(qc.getQueryData<ChatMessage[]>(messagesKey)?.at(-1)).toMatchObject({
+      id: "msg-review",
+      role: "assistant",
+      message_kind: "review_result",
+      actor_agent_id: "reviewer-1",
+      review_passed: true,
+    });
+  });
+
   it("does not seed an unfetched cache — the first fetch owns it", () => {
     const qc = createQueryClient();
     applyChatMessageToCache(qc, messagePayload());

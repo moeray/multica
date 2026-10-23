@@ -255,6 +255,9 @@ type ChatMessagePayload struct {
 	Content       string `json:"content"`
 	TaskID        string `json:"task_id,omitempty"`
 	CreatedAt     string `json:"created_at"`
+	MessageKind   string `json:"message_kind,omitempty"`
+	ActorAgentID  string `json:"actor_agent_id,omitempty"`
+	ReviewPassed  *bool  `json:"review_passed,omitempty"`
 }
 
 // Chat message kinds (chat_message.message_kind). Additive: unknown values
@@ -286,6 +289,9 @@ const (
 	// message-mode autopilot run. It renders like an ordinary reply and stays
 	// in the transcript so the member can follow up on it.
 	ChatMessageKindAgentReport = "agent_report"
+	// ChatMessageKindReviewResult marks a server-authored assistant message
+	// carrying a reviewer's final conclusion back into the source chat.
+	ChatMessageKindReviewResult = "review_result"
 )
 
 // ChatDonePayload is broadcast when an agent finishes responding to a chat

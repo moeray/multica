@@ -532,6 +532,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// connection of its own outside the per-installation supervisor. The Router
 	// is the single shared inbound handler injected into every Channel.
 	channelRegistry := channel.NewRegistry()
+	h.AgentMessages = service.NewAgentMessageService(
+		queries, bus, channel.NewMessageSender(channelRegistry, queries), signupConfig.AppURL,
+	)
 	channelRouter := engine.NewRouter(h.IssueService, h.TaskService, queries, engine.RouterConfig{
 		Logger: slog.Default(), Lifecycle: h,
 	})

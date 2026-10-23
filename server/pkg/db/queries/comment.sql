@@ -348,6 +348,19 @@ WHERE issue_id = @issue_id
 ORDER BY created_at DESC
 LIMIT 1;
 
+-- name: GetLatestCommentByAuthor :one
+-- The newest live comment written by one actor on an issue. Review-result
+-- messages use it to carry the reviewer's conclusion without re-reading the
+-- whole timeline.
+SELECT * FROM comment
+WHERE issue_id = @issue_id
+  AND workspace_id = @workspace_id
+  AND author_type = @author_type
+  AND author_id = @author_id
+  AND deleted_at IS NULL
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
 -- name: ListReconcilableCommentsForIssueSince :many
 -- MUL-4195 / MUL-4304 completion reconciliation: every MEMBER- or AGENT-authored
 -- comment on an issue created strictly after @since (the completing run's

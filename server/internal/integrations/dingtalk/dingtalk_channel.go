@@ -107,7 +107,12 @@ func (c *dingtalkChannel) releaseClosedDispatchSlot() {
 // subscriber and OutboundReplier) build their own sender with a full target.
 func (c *dingtalkChannel) Send(ctx context.Context, out channel.OutboundMessage) (channel.SendResult, error) {
 	s := &sender{client: c.client, robotCode: c.robotCode, appKey: c.appKey, appSecret: c.appSecret}
-	key, err := s.send(ctx, sendTarget{ConversationType: convTypeGroup, ConversationID: out.ChatID}, out.Text)
+	target := sendTarget{ConversationType: convTypeGroup, ConversationID: out.ChatID}
+	if out.ChatType == string(channel.ChatTypeP2P) {
+		target.ConversationType = convTypeP2P
+		target.StaffID = out.RecipientID
+	}
+	key, err := s.send(ctx, target, out.Text)
 	if err != nil {
 		return channel.SendResult{}, err
 	}

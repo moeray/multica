@@ -52,6 +52,8 @@
     "failed_after": "{{elapsed}} 후 실패",
     "finished_in": "{{elapsed}} 만에 완료",
     "no_response": "에이전트가 텍스트 답변 없이 이 턴을 마쳤습니다.",
+    "review_result_passed": "검토 통과",
+    "review_result_failed": "검토 실패",
     "failure": {
       "agent_error": "에이전트에 오류가 발생하여 답변을 완료하지 못했습니다. 다시 시도해 주세요.",
       "timeout": "시간이 너무 오래 걸려 완료 전에 중단되었습니다. 다시 시도하거나 요청을 더 작게 나눠 보세요.",

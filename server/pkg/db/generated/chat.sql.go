@@ -205,6 +205,74 @@ func (q *Queries) ClearChatSessionSessionIfMatches(ctx context.Context, arg Clea
 	return err
 }
 
+const createAgentChatMessage = `-- name: CreateAgentChatMessage :one
+INSERT INTO chat_message (
+    chat_session_id, role, content, task_id, message_kind, actor_agent_id,
+    review_passed, dedupe_key, id
+)
+VALUES (
+    $1, $2, $3, $6, $4, $7,
+    $8, $5, COALESCE($9::uuid, gen_random_uuid())
+)
+ON CONFLICT (chat_session_id, dedupe_key) WHERE dedupe_key IS NOT NULL
+DO NOTHING
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key
+`
+
+type CreateAgentChatMessageParams struct {
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	Role          string      `json:"role"`
+	Content       string      `json:"content"`
+	MessageKind   string      `json:"message_kind"`
+	DedupeKey     pgtype.Text `json:"dedupe_key"`
+	TaskID        pgtype.UUID `json:"task_id"`
+	ActorAgentID  pgtype.UUID `json:"actor_agent_id"`
+	ReviewPassed  pgtype.Bool `json:"review_passed"`
+	ID            pgtype.UUID `json:"id"`
+}
+
+// Idempotent insert for server-authored agent messages. The partial unique
+// index on (chat_session_id, dedupe_key) makes a retried producer return no
+// row here; callers then read the existing row with GetChatMessageByDedupeKey.
+func (q *Queries) CreateAgentChatMessage(ctx context.Context, arg CreateAgentChatMessageParams) (ChatMessage, error) {
+	row := q.db.QueryRow(ctx, createAgentChatMessage,
+		arg.ChatSessionID,
+		arg.Role,
+		arg.Content,
+		arg.MessageKind,
+		arg.DedupeKey,
+		arg.TaskID,
+		arg.ActorAgentID,
+		arg.ReviewPassed,
+		arg.ID,
+	)
+	var i ChatMessage
+	err := row.Scan(
+		&i.ID,
+		&i.ChatSessionID,
+		&i.Role,
+		&i.Content,
+		&i.TaskID,
+		&i.CreatedAt,
+		&i.FailureReason,
+		&i.ElapsedMs,
+		&i.MessageKind,
+		&i.ChannelMediaPendingUntil,
+		&i.ChannelIngested,
+		&i.QuickActions,
+		&i.ChannelContextRevision,
+		&i.ChannelOutboundType,
+		&i.ChannelOutboundInstallationID,
+		&i.ChannelOutboundChatID,
+		&i.ChannelOutboundMessageIds,
+		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
+	)
+	return i, err
+}
+
 const createChatDraftRestore = `-- name: CreateChatDraftRestore :one
 INSERT INTO chat_draft_restore (id, chat_session_id, task_id, content, attachment_ids)
 VALUES ($1, $2, $3, $4, $5)
@@ -247,7 +315,7 @@ const createChatMessage = `-- name: CreateChatMessage :one
 INSERT INTO chat_message (
     chat_session_id, role, content, task_id, failure_reason, elapsed_ms,
     message_kind, quick_actions, channel_media_pending_until, channel_ingested,
-    channel_context_revision, id
+    channel_context_revision, actor_agent_id, review_passed, dedupe_key, id
 )
 VALUES (
     $1, $2, $3, $4, $5, $6,
@@ -263,9 +331,12 @@ VALUES (
          ELSE now() + make_interval(secs => $9::float8) END,
     COALESCE($10::boolean, FALSE),
     $11,
-    COALESCE($12::uuid, gen_random_uuid())
+    $12,
+    $13,
+    $14,
+    COALESCE($15::uuid, gen_random_uuid())
 )
-RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key
 `
 
 type CreateChatMessageParams struct {
@@ -280,6 +351,9 @@ type CreateChatMessageParams struct {
 	ChannelMediaPendingSecs pgtype.Float8 `json:"channel_media_pending_secs"`
 	ChannelIngested         pgtype.Bool   `json:"channel_ingested"`
 	ChannelContextRevision  pgtype.Int8   `json:"channel_context_revision"`
+	ActorAgentID            pgtype.UUID   `json:"actor_agent_id"`
+	ReviewPassed            pgtype.Bool   `json:"review_passed"`
+	DedupeKey               pgtype.Text   `json:"dedupe_key"`
 	ID                      pgtype.UUID   `json:"id"`
 }
 
@@ -299,6 +373,9 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 		arg.ChannelMediaPendingSecs,
 		arg.ChannelIngested,
 		arg.ChannelContextRevision,
+		arg.ActorAgentID,
+		arg.ReviewPassed,
+		arg.DedupeKey,
 		arg.ID,
 	)
 	var i ChatMessage
@@ -321,6 +398,9 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -521,7 +601,7 @@ VALUES (
     $3::timestamptz + interval '1 microsecond',
     COALESCE($4::uuid, gen_random_uuid())
 )
-RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key
 `
 
 type CreateMikaOnboardingOpeningParams struct {
@@ -570,6 +650,9 @@ func (q *Queries) CreateMikaOnboardingOpening(ctx context.Context, arg CreateMik
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -744,7 +827,7 @@ DELETE FROM chat_message
 WHERE task_id = $1
   AND role = 'user'
   AND message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
-RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key
 `
 
 // Deletes the MEMBER-TYPED input of a cancelled/edited turn.
@@ -784,6 +867,9 @@ func (q *Queries) DeleteUserChatMessageByTask(ctx context.Context, taskID pgtype
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -826,7 +912,7 @@ func (q *Queries) GetChannelMediaPendingUntil(ctx context.Context, arg GetChanne
 }
 
 const getChatMessage = `-- name: GetChatMessage :one
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key FROM chat_message
 WHERE id = $1
 `
 
@@ -852,12 +938,54 @@ func (q *Queries) GetChatMessage(ctx context.Context, id pgtype.UUID) (ChatMessa
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
+	)
+	return i, err
+}
+
+const getChatMessageByDedupeKey = `-- name: GetChatMessageByDedupeKey :one
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key FROM chat_message
+WHERE chat_session_id = $1 AND dedupe_key = $2
+`
+
+type GetChatMessageByDedupeKeyParams struct {
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	DedupeKey     pgtype.Text `json:"dedupe_key"`
+}
+
+func (q *Queries) GetChatMessageByDedupeKey(ctx context.Context, arg GetChatMessageByDedupeKeyParams) (ChatMessage, error) {
+	row := q.db.QueryRow(ctx, getChatMessageByDedupeKey, arg.ChatSessionID, arg.DedupeKey)
+	var i ChatMessage
+	err := row.Scan(
+		&i.ID,
+		&i.ChatSessionID,
+		&i.Role,
+		&i.Content,
+		&i.TaskID,
+		&i.CreatedAt,
+		&i.FailureReason,
+		&i.ElapsedMs,
+		&i.MessageKind,
+		&i.ChannelMediaPendingUntil,
+		&i.ChannelIngested,
+		&i.QuickActions,
+		&i.ChannelContextRevision,
+		&i.ChannelOutboundType,
+		&i.ChannelOutboundInstallationID,
+		&i.ChannelOutboundChatID,
+		&i.ChannelOutboundMessageIds,
+		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }
 
 const getChatMessageByTaskAssistant = `-- name: GetChatMessageByTaskAssistant :one
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key FROM chat_message
 WHERE task_id = $1 AND role = 'assistant'
 ORDER BY created_at DESC
 LIMIT 1
@@ -887,6 +1015,9 @@ func (q *Queries) GetChatMessageByTaskAssistant(ctx context.Context, taskID pgty
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -1091,7 +1222,7 @@ func (q *Queries) GetLastChatTaskSession(ctx context.Context, arg GetLastChatTas
 }
 
 const getLatestAssistantChatMessageForSession = `-- name: GetLatestAssistantChatMessageForSession :one
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key FROM chat_message
 WHERE chat_session_id = $1 AND role = 'assistant' AND task_id IS NOT NULL
 ORDER BY created_at DESC
 LIMIT 1
@@ -1123,6 +1254,9 @@ func (q *Queries) GetLatestAssistantChatMessageForSession(ctx context.Context, c
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -1914,7 +2048,7 @@ func (q *Queries) ListChatDraftRestoresBySession(ctx context.Context, chatSessio
 }
 
 const listChatInputMessages = `-- name: ListChatInputMessages :many
-SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key FROM chat_message
 WHERE task_id = $1 AND role = 'user'
 ORDER BY created_at ASC, id ASC
 `
@@ -1954,6 +2088,9 @@ func (q *Queries) ListChatInputMessages(ctx context.Context, taskID pgtype.UUID)
 			&i.ChannelOutboundChatID,
 			&i.ChannelOutboundMessageIds,
 			&i.ChannelTypingSettled,
+			&i.ActorAgentID,
+			&i.ReviewPassed,
+			&i.DedupeKey,
 		); err != nil {
 			return nil, err
 		}
@@ -1966,7 +2103,7 @@ func (q *Queries) ListChatInputMessages(ctx context.Context, taskID pgtype.UUID)
 }
 
 const listChatMessages = `-- name: ListChatMessages :many
-SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled FROM chat_message AS message
+SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled, message.actor_agent_id, message.review_passed, message.dedupe_key FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
   AND message.message_kind != 'autopilot_kickoff'
@@ -2040,6 +2177,9 @@ func (q *Queries) ListChatMessages(ctx context.Context, chatSessionID pgtype.UUI
 			&i.ChannelOutboundChatID,
 			&i.ChannelOutboundMessageIds,
 			&i.ChannelTypingSettled,
+			&i.ActorAgentID,
+			&i.ReviewPassed,
+			&i.DedupeKey,
 		); err != nil {
 			return nil, err
 		}
@@ -2052,7 +2192,7 @@ func (q *Queries) ListChatMessages(ctx context.Context, chatSessionID pgtype.UUI
 }
 
 const listChatMessagesForLegacyTask = `-- name: ListChatMessagesForLegacyTask :many
-SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled FROM chat_message AS message
+SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled, message.actor_agent_id, message.review_passed, message.dedupe_key FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND NOT (
     message.role = 'user'
@@ -2114,6 +2254,9 @@ func (q *Queries) ListChatMessagesForLegacyTask(ctx context.Context, chatSession
 			&i.ChannelOutboundChatID,
 			&i.ChannelOutboundMessageIds,
 			&i.ChannelTypingSettled,
+			&i.ActorAgentID,
+			&i.ReviewPassed,
+			&i.DedupeKey,
 		); err != nil {
 			return nil, err
 		}
@@ -2126,7 +2269,7 @@ func (q *Queries) ListChatMessagesForLegacyTask(ctx context.Context, chatSession
 }
 
 const listChatMessagesPage = `-- name: ListChatMessagesPage :many
-SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled FROM chat_message AS message
+SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled, message.actor_agent_id, message.review_passed, message.dedupe_key FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
   AND message.message_kind != 'autopilot_kickoff'
@@ -2205,6 +2348,9 @@ func (q *Queries) ListChatMessagesPage(ctx context.Context, arg ListChatMessages
 			&i.ChannelOutboundChatID,
 			&i.ChannelOutboundMessageIds,
 			&i.ChannelTypingSettled,
+			&i.ActorAgentID,
+			&i.ReviewPassed,
+			&i.DedupeKey,
 		); err != nil {
 			return nil, err
 		}
@@ -2217,7 +2363,7 @@ func (q *Queries) ListChatMessagesPage(ctx context.Context, arg ListChatMessages
 }
 
 const listChatMessagesPageForChannelContext = `-- name: ListChatMessagesPageForChannelContext :many
-SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled
+SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled, message.actor_agent_id, message.review_passed, message.dedupe_key
 FROM chat_message AS message
 LEFT JOIN agent_task_queue AS owner ON owner.id = message.task_id
 WHERE message.chat_session_id = $1
@@ -2293,6 +2439,9 @@ func (q *Queries) ListChatMessagesPageForChannelContext(ctx context.Context, arg
 			&i.ChannelOutboundChatID,
 			&i.ChannelOutboundMessageIds,
 			&i.ChannelTypingSettled,
+			&i.ActorAgentID,
+			&i.ReviewPassed,
+			&i.DedupeKey,
 		); err != nil {
 			return nil, err
 		}
@@ -3392,7 +3541,7 @@ WHERE id = (
     ORDER BY inner_msg.created_at DESC
     LIMIT 1
 )
-RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled
+RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled, actor_agent_id, review_passed, dedupe_key
 `
 
 type SetChatMessageQuickActionsByTaskParams struct {
@@ -3422,6 +3571,9 @@ func (q *Queries) SetChatMessageQuickActionsByTask(ctx context.Context, arg SetC
 		&i.ChannelOutboundChatID,
 		&i.ChannelOutboundMessageIds,
 		&i.ChannelTypingSettled,
+		&i.ActorAgentID,
+		&i.ReviewPassed,
+		&i.DedupeKey,
 	)
 	return i, err
 }

@@ -423,6 +423,9 @@ export interface ChatMessageEventPayload {
   content: string;
   task_id?: string;
   created_at: string;
+  message_kind?: import("./chat").ChatMessageKind;
+  actor_agent_id?: string;
+  review_passed?: boolean;
 }
 
 export interface ChatDonePayload {

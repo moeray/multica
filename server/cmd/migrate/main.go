@@ -140,6 +140,14 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"598_chat_message_dedupe_key_index":                         "idx_chat_message_dedupe_key",
+	"594_inbox_item_dedupe_key_index":                           "idx_inbox_item_dedupe_key",
+	"591_inbox_lark_delivery_target_index":                      "idx_inbox_lark_delivery_target",
+	"590_inbox_lark_delivery_member_index":                      "idx_inbox_lark_delivery_member",
+	"589_inbox_lark_delivery_due_index":                         "idx_inbox_lark_delivery_due",
+	"588_inbox_lark_delivery_idempotency_index":                 "idx_inbox_lark_delivery_idempotency",
+	"586_inbox_lark_destination_member_index":                   "idx_inbox_lark_destination_member",
+	"584_channel_installation_inbox_member_index":               "idx_channel_installation_inbox_member",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",
@@ -366,6 +374,7 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"598_chat_message_dedupe_key_index":                     "idx_chat_message_dedupe_key",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",

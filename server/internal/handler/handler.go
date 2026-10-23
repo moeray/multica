@@ -215,6 +215,9 @@ type Handler struct {
 	PluginService          *service.PluginService
 	IssueService           *service.IssueService
 	AutopilotService       *service.AutopilotService
+	// AgentMessages persists server-authored assistant messages (review
+	// results today) and mirrors them to the source channel when active.
+	AgentMessages *service.AgentMessageService
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
@@ -649,6 +652,12 @@ func timestampToNanoPtr(t pgtype.Timestamptz) *string {
 }
 func dateToPtr(d pgtype.Date) *string { return util.DateToPtr(d) }
 func uuidToPtr(u pgtype.UUID) *string { return util.UUIDToPtr(u) }
+func boolToPtr(v pgtype.Bool) *bool {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Bool
+}
 
 // uuidsToStrings maps a UUID array column to string ids, skipping NULL/invalid
 // entries. Returns nil (not an empty slice) when there is nothing to emit so

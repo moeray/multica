@@ -974,9 +974,12 @@ export const ChatMessageSchema = z.object({
       "onboarding_opening",
       "autopilot_kickoff",
       "agent_report",
+      "review_result",
     ])
     .catch("message")
     .optional(),
+  actor_agent_id: z.string().nullable().optional(),
+  review_passed: z.boolean().nullable().optional(),
   // Optional additive data degrades independently: a malformed suggestion
   // must not hide the assistant reply that contains it.
   quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
@@ -2156,6 +2159,7 @@ const ChatLastMessageSchema = z.object({
     "onboarding_opening",
     "autopilot_kickoff",
     "agent_report",
+    "review_result",
   ]).optional().catch(undefined),
 }).loose();
 

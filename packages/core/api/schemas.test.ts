@@ -27,6 +27,7 @@ import {
   DashboardUsageByAgentListSchema,
   DashboardUsageDailyListSchema,
   ChatDraftRestoresResponseSchema,
+  ChatMessageSchema,
   ChatPendingTaskSchema,
   ChatSessionListSchema,
   ChatSessionSchema,
@@ -191,6 +192,32 @@ describe("ChatSessionSchema", () => {
     expect(parsed[1]?.last_message?.message_kind).toBe("onboarding_opening");
   });
 });
+
+describe("ChatMessageSchema", () => {
+  it("preserves review_result metadata and degrades unknown kinds", () => {
+    const parsed = ChatMessageSchema.parse({
+      id: "message-1",
+      chat_session_id: "chat-1",
+      role: "assistant",
+      content: "Review passed",
+      task_id: null,
+      created_at: "2026-10-23T00:00:00Z",
+      message_kind: "review_result",
+      actor_agent_id: "reviewer-1",
+      review_passed: true,
+    });
+    expect(parsed.message_kind).toBe("review_result");
+    expect(parsed.actor_agent_id).toBe("reviewer-1");
+    expect(parsed.review_passed).toBe(true);
+
+    const unknown = ChatMessageSchema.parse({
+      ...parsed,
+      message_kind: "future_kind",
+    });
+    expect(unknown.message_kind).toBe("message");
+  });
+});
+
 describe("IssueSchema (via ListIssuesResponseSchema)", () => {
   // A custom status key can be derived rather than readable — "客户确认" becomes
   // `in_review_2` — so the display name travels with it. The field has to

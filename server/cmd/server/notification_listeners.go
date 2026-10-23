@@ -848,10 +848,13 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 				"from": prevStatus,
 				"to":   issue.Status,
 			})
-			notifySubscribers(ctx, queries, bus, issue.ID, issue.Status, e.WorkspaceID, e,
-				nil, "status_changed", "info",
-				issue.Title, "",
-				statusDetails)
+			suppressStatus, _ := payload["suppress_status_notification"].(bool)
+			if !suppressStatus {
+				notifySubscribers(ctx, queries, bus, issue.ID, issue.Status, e.WorkspaceID, e,
+					nil, "status_changed", "info",
+					issue.Title, "",
+					statusDetails)
+			}
 
 			// When the issue progresses past the failure, retire any stale
 			// task_failed inbox rows so the inbox reflects the current state of

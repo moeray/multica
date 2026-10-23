@@ -2284,8 +2284,8 @@ type ChatLastMessage struct {
 	Role          string  `json:"role"`
 	CreatedAt     string  `json:"created_at"`
 	FailureReason *string `json:"failure_reason"`
-	// MessageKind is 'message' (default) or 'no_response'. Hidden onboarding
-	// kickoff rows make buildChatLastMessage return nil and are never exposed.
+	// MessageKind is the stored chat_message kind. Hidden onboarding kickoff
+	// rows make buildChatLastMessage return nil and are never exposed.
 	MessageKind string `json:"message_kind"`
 }
 
@@ -2320,6 +2320,11 @@ type ChatMessageResponse struct {
 	// MessageKind is additive. User-facing list handlers filter onboarding
 	// kickoff rows; clients still understand that kind as a compatibility guard.
 	MessageKind string `json:"message_kind"`
+	// ActorAgentID is set when a server-authored message was produced by an
+	// agent other than the chat session's own agent (for example a reviewer).
+	ActorAgentID *string `json:"actor_agent_id"`
+	// ReviewPassed is set only on message_kind='review_result'.
+	ReviewPassed *bool `json:"review_passed"`
 	// QuickActions are sanitized follow-ups generated with this assistant turn.
 	// Always an empty array for legacy rows and user messages.
 	QuickActions []protocol.ChatQuickAction `json:"quick_actions"`
@@ -2357,6 +2362,8 @@ func chatMessageToResponse(m db.ChatMessage, attachments []AttachmentResponse) C
 		FailureReason: textToPtr(m.FailureReason),
 		ElapsedMs:     int8ToPtr(m.ElapsedMs),
 		MessageKind:   normalizeMessageKind(m.MessageKind),
+		ActorAgentID:  uuidToPtr(m.ActorAgentID),
+		ReviewPassed:  boolToPtr(m.ReviewPassed),
 		QuickActions:  decodeChatQuickActions(m.QuickActions),
 		Attachments:   attachments,
 	}
@@ -2409,6 +2416,8 @@ func normalizeMessageKind(kind string) string {
 		return protocol.ChatMessageKindOnboardingOpening
 	case protocol.ChatMessageKindAgentReport:
 		return protocol.ChatMessageKindAgentReport
+	case protocol.ChatMessageKindReviewResult:
+		return protocol.ChatMessageKindReviewResult
 	default:
 		return protocol.ChatMessageKindMessage
 	}

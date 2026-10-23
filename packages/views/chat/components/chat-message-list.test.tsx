@@ -812,6 +812,44 @@ describe("ChatMessageList channel quote presentation", () => {
   });
 });
 
+describe("ChatMessageList review result", () => {
+  it("renders the verdict badge and a clickable issue link", async () => {
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={new QueryClient()}>
+          <ChatMessageList
+            messages={[
+              {
+                id: "review-result",
+                chat_session_id: "s1",
+                role: "assistant",
+                content:
+                  "Review failed\n\nMissing permission coverage.\n\n[MP-56](https://app.example/acme/issues/MP-56)",
+                task_id: null,
+                created_at: new Date(0).toISOString(),
+                message_kind: "review_result",
+                review_passed: false,
+                actor_agent_id: "reviewer-1",
+              },
+            ]}
+            pendingTask={undefined}
+            availability="online"
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    expect(
+      await screen.findByText("Review failed", { selector: '[data-slot="badge"]' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MP-56" })).toHaveAttribute(
+      "href",
+      "https://app.example/acme/issues/MP-56",
+    );
+    expect(screen.getByText("Missing permission coverage.")).toBeInTheDocument();
+  });
+});
+
 describe("ChatMessageList failure copy (MUL-5370 regression)", () => {
   // The backend moved to the refined taxonomy (agent_error.*) in MUL-2946 but
   // the copy map stayed on the six coarse values, so an exact-key lookup

@@ -54,6 +54,8 @@
     "failed_after": "Failed after {{elapsed}}",
     "finished_in": "Finished in {{elapsed}}",
     "no_response": "The agent finished this turn without a text reply.",
+    "review_result_passed": "Review passed",
+    "review_result_failed": "Review failed",
     "failure": {
       "agent_error": "The agent ran into an error and couldn't finish replying. Please try again.",
       "timeout": "The agent took too long and stopped before finishing. Try again, or break your request into smaller steps.",

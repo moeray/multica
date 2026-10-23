@@ -490,7 +490,7 @@ WHERE id = $1;
 INSERT INTO chat_message (
     chat_session_id, role, content, task_id, failure_reason, elapsed_ms,
     message_kind, quick_actions, channel_media_pending_until, channel_ingested,
-    channel_context_revision, id
+    channel_context_revision, actor_agent_id, review_passed, dedupe_key, id
 )
 VALUES (
     $1, $2, $3, sqlc.narg(task_id), sqlc.narg(failure_reason), sqlc.narg(elapsed_ms),
@@ -506,9 +506,32 @@ VALUES (
          ELSE now() + make_interval(secs => sqlc.narg(channel_media_pending_secs)::float8) END,
     COALESCE(sqlc.narg(channel_ingested)::boolean, FALSE),
     sqlc.narg(channel_context_revision),
+    sqlc.narg(actor_agent_id),
+    sqlc.narg(review_passed),
+    sqlc.narg(dedupe_key),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 )
 RETURNING *;
+
+-- name: CreateAgentChatMessage :one
+-- Idempotent insert for server-authored agent messages. The partial unique
+-- index on (chat_session_id, dedupe_key) makes a retried producer return no
+-- row here; callers then read the existing row with GetChatMessageByDedupeKey.
+INSERT INTO chat_message (
+    chat_session_id, role, content, task_id, message_kind, actor_agent_id,
+    review_passed, dedupe_key, id
+)
+VALUES (
+    $1, $2, $3, sqlc.narg(task_id), $4, sqlc.narg(actor_agent_id),
+    sqlc.narg(review_passed), $5, COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+)
+ON CONFLICT (chat_session_id, dedupe_key) WHERE dedupe_key IS NOT NULL
+DO NOTHING
+RETURNING *;
+
+-- name: GetChatMessageByDedupeKey :one
+SELECT * FROM chat_message
+WHERE chat_session_id = $1 AND dedupe_key = $2;
 
 -- name: TaskHasChannelIngestedMessages :one
 -- Immutable channel provenance for a task's user-message input batch:
