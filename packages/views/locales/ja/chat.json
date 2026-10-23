@@ -241,6 +241,13 @@
     "archived_title": "アーカイブ済み",
     "row_actions_aria": "チャットの操作"
   },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "現在",
+    "historical": "履歴",
+    "current_binding": "現在の連携",
+    "historical_session": "過去のセッション"
+  },
   "header": {
     "view_profile": "Agent のプロフィール",
     "rename": "名前を変更",

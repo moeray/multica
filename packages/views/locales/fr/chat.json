@@ -245,6 +245,13 @@
     "archived_title": "Archivées",
     "row_actions_aria": "Actions de discussion"
   },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "Actuel",
+    "historical": "Historique",
+    "current_binding": "Liaison actuelle",
+    "historical_session": "Session historique"
+  },
   "header": {
     "view_profile": "Voir le profil de l'agent",
     "rename": "Renommer la discussion",

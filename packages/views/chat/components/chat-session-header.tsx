@@ -32,6 +32,7 @@ import { isImeComposing } from "@multica/core/utils";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { AppLink } from "../../navigation";
 import { useT } from "../../i18n";
+import { ChatChannelBadge, isFeishuChatSession } from "./chat-channel-badge";
 
 /**
  * Per-session header for the conversation pane: agent avatar + editable chat
@@ -59,6 +60,7 @@ export function ChatSessionHeader({
   const setActiveSession = useChatStore((s) => s.setActiveSession);
 
   const isArchived = session.status === "archived";
+  const isFeishu = isFeishuChatSession(session);
 
   const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -199,10 +201,18 @@ export function ChatSessionHeader({
             {title}
           </button>
         )}
-        {agent && (
-          <div className="truncate text-caption text-muted-foreground">
-            {agent.name}
-            {agent.description ? ` · ${agent.description}` : ""}
+        {(agent || isFeishu) && (
+          <div className="flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
+            {agent && (
+              <span className="min-w-0 truncate">
+                {agent.name}
+                {agent.description ? ` · ${agent.description}` : ""}
+              </span>
+            )}
+            <ChatChannelBadge
+              session={session}
+              variant="header"
+            />
           </div>
         )}
       </div>

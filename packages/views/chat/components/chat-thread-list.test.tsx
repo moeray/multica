@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { I18nProvider } from "@multica/core/i18n/react";
 import type { Agent, ChatSession } from "@multica/core/types";
 import enChat from "../../locales/en/chat.json";
@@ -218,6 +218,110 @@ describe("ChatThreadList agent identity", () => {
 
     expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
     expect(screen.getByText("Still identifiable by its preview")).toBeInTheDocument();
+  });
+});
+
+describe("ChatThreadList Feishu channel state", () => {
+  const channelSource = {
+    channel_type: "feishu",
+    installation_id: "installation-1",
+    route_revision: 1,
+  };
+
+  const feishuCurrent = makeSession({
+    id: "feishu-current",
+    title: "Feishu current",
+    channel_source: channelSource,
+    is_current_channel_route: true,
+    last_message: {
+      content: "Current Feishu reply",
+      role: "assistant",
+      created_at: "2026-07-08T03:00:00Z",
+    },
+  });
+  const feishuHistorical = makeSession({
+    id: "feishu-historical",
+    title: "Feishu historical",
+    channel_source: { ...channelSource, route_revision: 0 },
+    is_current_channel_route: false,
+    last_message: {
+      content: "Historical Feishu reply",
+      role: "assistant",
+      created_at: "2026-07-08T02:00:00Z",
+    },
+  });
+  const webSession = makeSession({
+    id: "web-only",
+    title: "Web only",
+    last_message: {
+      content: "Web reply",
+      role: "assistant",
+      created_at: "2026-07-08T01:00:00Z",
+    },
+  });
+  const otherChannelSession = makeSession({
+    id: "other-channel",
+    title: "Other channel",
+    channel_source: { ...channelSource, channel_type: "slack" },
+    is_current_channel_route: true,
+  });
+
+  it("marks current and historical Feishu sessions but not first-party chats", () => {
+    renderList(null, {
+      renderedSessions: [
+        feishuCurrent,
+        feishuHistorical,
+        webSession,
+        otherChannelSession,
+      ],
+    });
+
+    const currentRow = screen.getByText("Feishu current").closest("[tabindex]") as HTMLElement;
+    const historicalRow = screen
+      .getByText("Feishu historical")
+      .closest("[tabindex]") as HTMLElement;
+    const webRow = screen.getByText("Web only").closest("[tabindex]") as HTMLElement;
+    const otherChannelRow = screen
+      .getByText("Other channel")
+      .closest("[tabindex]") as HTMLElement;
+
+    const currentTitle = `${enChat.channel.feishu} · ${enChat.channel.current}`;
+    const historicalTitle = `${enChat.channel.feishu} · ${enChat.channel.historical}`;
+
+    const currentBadge = within(currentRow).getByTitle(currentTitle);
+    expect(currentBadge).toHaveAttribute("aria-label", currentTitle);
+    expect(currentBadge.className).toContain("max-w-[55%]");
+    expect(currentBadge.className).toContain("bg-emerald-500/10");
+
+    const historicalBadge = within(historicalRow).getByTitle(historicalTitle);
+    expect(historicalBadge).toHaveAttribute("aria-label", historicalTitle);
+    expect(historicalBadge.className).toContain("bg-muted/40");
+
+    expect(within(webRow).queryByTitle(currentTitle)).not.toBeInTheDocument();
+    expect(within(webRow).queryByTitle(historicalTitle)).not.toBeInTheDocument();
+    expect(within(otherChannelRow).queryByTitle(currentTitle)).not.toBeInTheDocument();
+    expect(within(otherChannelRow).queryByTitle(historicalTitle)).not.toBeInTheDocument();
+    expect(within(currentRow).getByText("Current Feishu reply")).toBeInTheDocument();
+    expect(within(historicalRow).getByText("Historical Feishu reply")).toBeInTheDocument();
+  });
+
+  it("treats a Feishu route without the current flag as historical", () => {
+    renderList(null, {
+      renderedSessions: [
+        makeSession({
+          id: "feishu-unknown-route",
+          title: "Feishu unknown route",
+          channel_source: channelSource,
+        }),
+      ],
+    });
+
+    expect(
+      screen.getByTitle(`${enChat.channel.feishu} · ${enChat.channel.historical}`),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTitle(`${enChat.channel.feishu} · ${enChat.channel.current}`),
+    ).not.toBeInTheDocument();
   });
 });
 

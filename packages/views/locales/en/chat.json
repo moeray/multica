@@ -245,6 +245,13 @@
     "archived_title": "Archived",
     "row_actions_aria": "Chat actions"
   },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "Current",
+    "historical": "Historical",
+    "current_binding": "Current binding",
+    "historical_session": "Historical session"
+  },
   "header": {
     "view_profile": "View agent profile",
     "rename": "Rename chat",
