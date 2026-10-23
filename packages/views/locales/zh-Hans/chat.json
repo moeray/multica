@@ -241,6 +241,13 @@
     "archived_title": "已归档",
     "row_actions_aria": "聊天操作"
   },
+  "channel": {
+    "feishu": "飞书",
+    "current": "当前",
+    "historical": "历史",
+    "current_binding": "当前绑定",
+    "historical_session": "历史会话"
+  },
   "header": {
     "view_profile": "查看智能体资料",
     "rename": "重命名会话",

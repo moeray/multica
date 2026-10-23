@@ -241,6 +241,13 @@
     "archived_title": "보관됨",
     "row_actions_aria": "채팅 작업"
   },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "현재",
+    "historical": "이전",
+    "current_binding": "현재 연결",
+    "historical_session": "이전 세션"
+  },
   "header": {
     "view_profile": "Agent 프로필 보기",
     "rename": "이름 변경",

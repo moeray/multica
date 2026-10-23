@@ -63,6 +63,14 @@ function startRename(): HTMLInputElement {
   return screen.getByRole("textbox", { name: RENAME_LABEL });
 }
 
+function renderHeader(headerSession: ChatSession) {
+  render(
+    <I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <ChatSessionHeader session={headerSession} agent={null} />
+    </I18nProvider>,
+  );
+}
+
 describe("ChatSessionHeader rename keyboard behavior", () => {
   beforeEach(() => {
     updateMutate.mockReset();
@@ -178,5 +186,50 @@ describe("ChatSessionHeader rename keyboard behavior", () => {
     expect(updateMutate).not.toHaveBeenCalled();
     expect(screen.queryByRole("textbox", { name: RENAME_LABEL })).not.toBeInTheDocument();
     expect(screen.getByText("Original title")).toBeInTheDocument();
+  });
+});
+
+describe("ChatSessionHeader Feishu channel state", () => {
+  const channelSource = {
+    channel_type: "feishu",
+    installation_id: "installation-1",
+    route_revision: 1,
+  };
+
+  it("shows the current binding for an active Feishu route", () => {
+    renderHeader({
+      ...session,
+      channel_source: channelSource,
+      is_current_channel_route: true,
+    });
+
+    const label = `${enChat.channel.feishu} · ${enChat.channel.current_binding}`;
+    expect(screen.getByTitle(label)).toHaveAttribute("aria-label", label);
+  });
+
+  it("shows a historical session for a retired Feishu route", () => {
+    renderHeader({
+      ...session,
+      channel_source: channelSource,
+      is_current_channel_route: false,
+    });
+
+    const label = `${enChat.channel.feishu} · ${enChat.channel.historical_session}`;
+    expect(screen.getByTitle(label)).toHaveAttribute("aria-label", label);
+  });
+
+  it("does not mark a first-party chat as a Feishu session", () => {
+    renderHeader(session);
+
+    expect(
+      screen.queryByTitle(
+        `${enChat.channel.feishu} · ${enChat.channel.current_binding}`,
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTitle(
+        `${enChat.channel.feishu} · ${enChat.channel.historical_session}`,
+      ),
+    ).not.toBeInTheDocument();
   });
 });
