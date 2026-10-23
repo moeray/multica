@@ -161,7 +161,7 @@ func (q *Queries) ArchiveInboxByIssueAndType(ctx context.Context, arg ArchiveInb
 const archiveInboxItem = `-- name: ArchiveInboxItem :one
 UPDATE inbox_item SET archived = true
 WHERE id = $1
-RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key
 `
 
 func (q *Queries) ArchiveInboxItem(ctx context.Context, id pgtype.UUID) (InboxItem, error) {
@@ -183,6 +183,9 @@ func (q *Queries) ArchiveInboxItem(ctx context.Context, id pgtype.UUID) (InboxIt
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -256,6 +259,78 @@ func (q *Queries) CountUnreadInboxByWorkspace(ctx context.Context, recipientID p
 	return items, nil
 }
 
+const createAutopilotReportInboxItem = `-- name: CreateAutopilotReportInboxItem :one
+INSERT INTO inbox_item (
+    workspace_id, recipient_type, recipient_id, type, severity, issue_id,
+    title, body, actor_type, actor_id, details,
+    chat_session_id, chat_message_id, dedupe_key, id
+)
+SELECT
+    $1, 'member', $2, 'agent_message', 'info', NULL,
+    $3, $4, 'agent', $5, $6,
+    $8, $9, $7,
+    COALESCE($10::uuid, gen_random_uuid())
+WHERE EXISTS (
+    SELECT 1 FROM member WHERE workspace_id = $1 AND user_id = $2
+)
+ON CONFLICT (workspace_id, dedupe_key) WHERE dedupe_key IS NOT NULL
+DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key
+`
+
+type CreateAutopilotReportInboxItemParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	RecipientID   pgtype.UUID `json:"recipient_id"`
+	Title         string      `json:"title"`
+	Body          pgtype.Text `json:"body"`
+	ActorID       pgtype.UUID `json:"actor_id"`
+	Details       []byte      `json:"details"`
+	DedupeKey     pgtype.Text `json:"dedupe_key"`
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	ChatMessageID pgtype.UUID `json:"chat_message_id"`
+	ID            pgtype.UUID `json:"id"`
+}
+
+// Fallback delivery for a message-mode autopilot whose recipient has no bound
+// conversation. The dedupe key is scoped to the run so a retried completion or
+// a replayed event cannot enqueue a second notification.
+func (q *Queries) CreateAutopilotReportInboxItem(ctx context.Context, arg CreateAutopilotReportInboxItemParams) (InboxItem, error) {
+	row := q.db.QueryRow(ctx, createAutopilotReportInboxItem,
+		arg.WorkspaceID,
+		arg.RecipientID,
+		arg.Title,
+		arg.Body,
+		arg.ActorID,
+		arg.Details,
+		arg.DedupeKey,
+		arg.ChatSessionID,
+		arg.ChatMessageID,
+		arg.ID,
+	)
+	var i InboxItem
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RecipientType,
+		&i.RecipientID,
+		&i.Type,
+		&i.Severity,
+		&i.IssueID,
+		&i.Title,
+		&i.Body,
+		&i.Read,
+		&i.Archived,
+		&i.CreatedAt,
+		&i.ActorType,
+		&i.ActorID,
+		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
+	)
+	return i, err
+}
+
 const createInboxItem = `-- name: CreateInboxItem :one
 INSERT INTO inbox_item (
     workspace_id, recipient_type, recipient_id,
@@ -268,7 +343,7 @@ WHERE ($2::text = 'member' AND EXISTS (
 )) OR ($2::text = 'agent' AND EXISTS (
     SELECT 1 FROM agent WHERE workspace_id = $1 AND id = $3
 ))
-RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key
 `
 
 type CreateInboxItemParams struct {
@@ -320,12 +395,15 @@ func (q *Queries) CreateInboxItem(ctx context.Context, arg CreateInboxItemParams
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }
 
 const getInboxItem = `-- name: GetInboxItem :one
-SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details FROM inbox_item
+SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key FROM inbox_item
 WHERE id = $1
 `
 
@@ -348,12 +426,15 @@ func (q *Queries) GetInboxItem(ctx context.Context, id pgtype.UUID) (InboxItem, 
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }
 
 const getInboxItemInWorkspace = `-- name: GetInboxItemInWorkspace :one
-SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details FROM inbox_item
+SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key FROM inbox_item
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -381,6 +462,9 @@ func (q *Queries) GetInboxItemInWorkspace(ctx context.Context, arg GetInboxItemI
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -430,7 +514,7 @@ WITH eligible_archived AS MATERIALIZED (
     UNION
     SELECT id FROM comment_anchors
 )
-SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severity, i.issue_id, i.title, i.body, i.read, i.archived, i.created_at, i.actor_type, i.actor_id, i.details,
+SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severity, i.issue_id, i.title, i.body, i.read, i.archived, i.created_at, i.actor_type, i.actor_id, i.details, i.chat_session_id, i.chat_message_id, i.dedupe_key,
        iss.status AS issue_status,
        iss.priority AS issue_priority
 FROM inbox_item i
@@ -461,6 +545,9 @@ type ListArchivedInboxItemsRow struct {
 	ActorType     pgtype.Text        `json:"actor_type"`
 	ActorID       pgtype.UUID        `json:"actor_id"`
 	Details       []byte             `json:"details"`
+	ChatSessionID pgtype.UUID        `json:"chat_session_id"`
+	ChatMessageID pgtype.UUID        `json:"chat_message_id"`
+	DedupeKey     pgtype.Text        `json:"dedupe_key"`
 	IssueStatus   pgtype.Text        `json:"issue_status"`
 	IssuePriority pgtype.Text        `json:"issue_priority"`
 }
@@ -511,6 +598,9 @@ func (q *Queries) ListArchivedInboxItems(ctx context.Context, arg ListArchivedIn
 			&i.ActorType,
 			&i.ActorID,
 			&i.Details,
+			&i.ChatSessionID,
+			&i.ChatMessageID,
+			&i.DedupeKey,
 			&i.IssueStatus,
 			&i.IssuePriority,
 		); err != nil {
@@ -525,7 +615,7 @@ func (q *Queries) ListArchivedInboxItems(ctx context.Context, arg ListArchivedIn
 }
 
 const listInboxItems = `-- name: ListInboxItems :many
-SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severity, i.issue_id, i.title, i.body, i.read, i.archived, i.created_at, i.actor_type, i.actor_id, i.details,
+SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severity, i.issue_id, i.title, i.body, i.read, i.archived, i.created_at, i.actor_type, i.actor_id, i.details, i.chat_session_id, i.chat_message_id, i.dedupe_key,
        iss.status AS issue_status,
        iss.priority AS issue_priority
 FROM inbox_item i
@@ -556,6 +646,9 @@ type ListInboxItemsRow struct {
 	ActorType     pgtype.Text        `json:"actor_type"`
 	ActorID       pgtype.UUID        `json:"actor_id"`
 	Details       []byte             `json:"details"`
+	ChatSessionID pgtype.UUID        `json:"chat_session_id"`
+	ChatMessageID pgtype.UUID        `json:"chat_message_id"`
+	DedupeKey     pgtype.Text        `json:"dedupe_key"`
 	IssueStatus   pgtype.Text        `json:"issue_status"`
 	IssuePriority pgtype.Text        `json:"issue_priority"`
 }
@@ -585,6 +678,9 @@ func (q *Queries) ListInboxItems(ctx context.Context, arg ListInboxItemsParams) 
 			&i.ActorType,
 			&i.ActorID,
 			&i.Details,
+			&i.ChatSessionID,
+			&i.ChatMessageID,
+			&i.DedupeKey,
 			&i.IssueStatus,
 			&i.IssuePriority,
 		); err != nil {
@@ -619,7 +715,7 @@ func (q *Queries) MarkAllInboxRead(ctx context.Context, arg MarkAllInboxReadPara
 const markInboxRead = `-- name: MarkInboxRead :one
 UPDATE inbox_item SET read = true
 WHERE id = $1
-RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key
 `
 
 func (q *Queries) MarkInboxRead(ctx context.Context, id pgtype.UUID) (InboxItem, error) {
@@ -641,6 +737,9 @@ func (q *Queries) MarkInboxRead(ctx context.Context, id pgtype.UUID) (InboxItem,
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -648,7 +747,7 @@ func (q *Queries) MarkInboxRead(ctx context.Context, id pgtype.UUID) (InboxItem,
 const markInboxUnread = `-- name: MarkInboxUnread :one
 UPDATE inbox_item SET read = false
 WHERE id = $1
-RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key
 `
 
 // Exact inverse of MarkInboxRead, and item-level for the same reason it is:
@@ -676,6 +775,9 @@ func (q *Queries) MarkInboxUnread(ctx context.Context, id pgtype.UUID) (InboxIte
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }
@@ -711,7 +813,7 @@ func (q *Queries) UnarchiveInboxByIssue(ctx context.Context, arg UnarchiveInboxB
 const unarchiveInboxItem = `-- name: UnarchiveInboxItem :one
 UPDATE inbox_item SET archived = false
 WHERE id = $1
-RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details, chat_session_id, chat_message_id, dedupe_key
 `
 
 // Deliberately does not touch `read`: unarchiving restores an item to the main
@@ -736,6 +838,9 @@ func (q *Queries) UnarchiveInboxItem(ctx context.Context, id pgtype.UUID) (Inbox
 		&i.ActorType,
 		&i.ActorID,
 		&i.Details,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.DedupeKey,
 	)
 	return i, err
 }

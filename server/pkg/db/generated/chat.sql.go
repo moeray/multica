@@ -102,6 +102,7 @@ SELECT EXISTS (
     WHERE chat_session_id = $1
       AND role = 'user'
       AND message_kind != 'channel_command'
+      AND message_kind != 'autopilot_kickoff'
 ) AS has_public_user_message
 `
 
@@ -115,7 +116,9 @@ func (q *Queries) ChatSessionHasPublicUserMessage(ctx context.Context, chatSessi
 const chatSessionHasUserMessage = `-- name: ChatSessionHasUserMessage :one
 SELECT EXISTS (
     SELECT 1 FROM chat_message
-    WHERE chat_session_id = $1 AND role = 'user'
+    WHERE chat_session_id = $1
+      AND role = 'user'
+      AND message_kind != 'autopilot_kickoff'
 ) AS has_user_message
 `
 
@@ -740,7 +743,7 @@ const deleteUserChatMessageByTask = `-- name: DeleteUserChatMessageByTask :one
 DELETE FROM chat_message
 WHERE task_id = $1
   AND role = 'user'
-  AND message_kind <> 'onboarding_kickoff'
+  AND message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
 RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reason, elapsed_ms, message_kind, channel_media_pending_until, channel_ingested, quick_actions, channel_context_revision, channel_outbound_type, channel_outbound_installation_id, channel_outbound_chat_id, channel_outbound_message_ids, channel_typing_settled
 `
 
@@ -755,6 +758,10 @@ RETURNING id, chat_session_id, role, content, task_id, created_at, failure_reaso
 // member the product's internal prompt as their restored draft, and silently
 // drop what they actually typed. Callers release the kickoff separately
 // (ReleaseOnboardingKickoffFromTask) so the next send re-adopts it.
+//
+// autopilot_kickoff is the same hazard for message-mode autopilot tasks: it is
+// server-authored context, never the member's draft. Cancelling or editing such
+// a queued task must leave it in place rather than restore the internal prompt.
 func (q *Queries) DeleteUserChatMessageByTask(ctx context.Context, taskID pgtype.UUID) (ChatMessage, error) {
 	row := q.db.QueryRow(ctx, deleteUserChatMessageByTask, taskID)
 	var i ChatMessage
@@ -1206,6 +1213,7 @@ WHERE cs.id = $1
       SELECT 1 FROM chat_message AS public_message
       WHERE public_message.chat_session_id = cs.id
         AND public_message.message_kind != 'channel_command'
+        AND public_message.message_kind != 'autopilot_kickoff'
     )
   )
 `
@@ -1425,12 +1433,14 @@ WHERE session.id = $2
       AND message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
   AND NOT EXISTS (
     SELECT 1 FROM chat_message AS other_message
     WHERE other_message.chat_session_id = session.id
       AND other_message.role = 'user'
       AND other_message.message_kind != 'channel_command'
+      AND other_message.message_kind != 'autopilot_kickoff'
       AND other_message.id != $3
   )
 RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at, project_id, explicitly_created_at
@@ -1477,6 +1487,7 @@ WHERE session.id = $2
     WHERE message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
 RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at, project_id, explicitly_created_at
 `
@@ -1717,7 +1728,7 @@ LEFT JOIN LATERAL (
   SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
-     AND m.message_kind != 'channel_command'
+     AND m.message_kind NOT IN ('channel_command', 'autopilot_kickoff')
    ORDER BY m.created_at DESC
    LIMIT 1
 ) lm ON true
@@ -1958,6 +1969,7 @@ const listChatMessages = `-- name: ListChatMessages :many
 SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
+  AND message.message_kind != 'autopilot_kickoff'
   AND NOT (
     message.role = 'user'
     AND EXISTS (
@@ -2117,6 +2129,7 @@ const listChatMessagesPage = `-- name: ListChatMessagesPage :many
 SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
+  AND message.message_kind != 'autopilot_kickoff'
   AND NOT (
     message.role = 'user'
     AND EXISTS (
@@ -2307,7 +2320,7 @@ LEFT JOIN LATERAL (
   SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
-     AND m.message_kind != 'channel_command'
+     AND m.message_kind NOT IN ('channel_command', 'autopilot_kickoff')
    ORDER BY m.created_at DESC
    LIMIT 1
 ) lm ON true
@@ -2478,6 +2491,7 @@ LEFT JOIN LATERAL (
     FROM chat_message AS input
     WHERE input.task_id = COALESCE(task.chat_input_task_id, task.id)
       AND input.role = 'user'
+      AND input.message_kind <> 'autopilot_kickoff'
     ORDER BY input.created_at ASC, input.id ASC
     LIMIT 1
 ) AS message ON TRUE
@@ -3131,7 +3145,7 @@ WITH latest_visible AS (
       -- moving it to dispatch time reverses that, and because the batch's two
       -- rows would then share one timestamp, their order falls to random UUIDs
       -- (MUL-5827).
-      AND claimed_input.message_kind <> 'onboarding_kickoff'
+      AND claimed_input.message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
 )
 UPDATE chat_message AS claimed_input
 SET created_at = GREATEST(
@@ -3186,7 +3200,7 @@ WHERE queued_input.chat_session_id = $1
   -- Same exclusion, same reason as ReanchorClaimedDirectChatInput: the hidden
   -- kickoff has no visible position to fix, and moving it would put the
   -- product's context after the member's message inside one input batch.
-  AND queued_input.message_kind <> 'onboarding_kickoff'
+  AND queued_input.message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
   AND queued_input.created_at <= $2::timestamptz
   AND EXISTS (
     SELECT 1
@@ -3293,6 +3307,7 @@ WHERE session.id = $2
     WHERE message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
 RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, runtime_id, last_read_at, is_agent_intro, pinned_at, project_id, explicitly_created_at
 `

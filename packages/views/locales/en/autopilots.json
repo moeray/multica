@@ -32,7 +32,8 @@
   },
   "execution_mode": {
     "create_issue": "Create Issue",
-    "run_only": "Run Only"
+    "run_only": "Run Only",
+    "message": "Message"
   },
   "relative_date": {
     "today": "Today",
@@ -339,6 +340,10 @@
       "run_only": {
         "label": "Run only",
         "description": "Silent run, no issue created"
+      },
+      "message": {
+        "label": "Message",
+        "description": "Send each run's result into the agent's chat"
       }
     }
   },

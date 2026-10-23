@@ -56,6 +56,7 @@ const TYPE_KEY: Record<InboxItemType, string> = {
   quick_create_unconfirmed: "type.quick_create_unconfirmed",
   autopilot_paused: "type.autopilot_paused",
   autopilot_quota_exceeded: "type.autopilot_quota_exceeded",
+  agent_message: "type.agent_message",
   children_done: "type.children_done",
 };
 

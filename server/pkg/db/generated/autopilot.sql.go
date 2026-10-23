@@ -154,6 +154,129 @@ func (q *Queries) CreateAutopilot(ctx context.Context, arg CreateAutopilotParams
 	return i, err
 }
 
+const createAutopilotChatTask = `-- name: CreateAutopilotChatTask :one
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, issue_id, status, priority, chat_session_id,
+    autopilot_run_id, trigger_summary, initiator_user_id,
+    originator_user_id, accountable_user_id, rule_version_id, force_fresh_session,
+    originator_source, trigger_evidence_kind, trigger_evidence_ref_id, id
+)
+SELECT
+    $1, $2, NULL, 'queued', $3, $4,
+    $5, $6, $7,
+    $8, $9,
+    $10, FALSE,
+    $11, $12,
+    $13,
+    COALESCE($14::uuid, gen_random_uuid())
+WHERE lock_task_owner_rows($1, NULL, $2)
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step
+`
+
+type CreateAutopilotChatTaskParams struct {
+	AgentID              pgtype.UUID `json:"agent_id"`
+	RuntimeID            pgtype.UUID `json:"runtime_id"`
+	Priority             int32       `json:"priority"`
+	ChatSessionID        pgtype.UUID `json:"chat_session_id"`
+	AutopilotRunID       pgtype.UUID `json:"autopilot_run_id"`
+	TriggerSummary       pgtype.Text `json:"trigger_summary"`
+	InitiatorUserID      pgtype.UUID `json:"initiator_user_id"`
+	OriginatorUserID     pgtype.UUID `json:"originator_user_id"`
+	AccountableUserID    pgtype.UUID `json:"accountable_user_id"`
+	RuleVersionID        pgtype.UUID `json:"rule_version_id"`
+	OriginatorSource     pgtype.Text `json:"originator_source"`
+	TriggerEvidenceKind  pgtype.Text `json:"trigger_evidence_kind"`
+	TriggerEvidenceRefID pgtype.UUID `json:"trigger_evidence_ref_id"`
+	ID                   pgtype.UUID `json:"id"`
+}
+
+// Message-mode dispatch: enqueue the report as an ordinary chat task inside an
+// existing conversation, linked to the autopilot run. The task carries no
+// issue; the caller writes the hidden kickoff user message in the same
+// transaction and owns it via chat_input_task_id.
+func (q *Queries) CreateAutopilotChatTask(ctx context.Context, arg CreateAutopilotChatTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, createAutopilotChatTask,
+		arg.AgentID,
+		arg.RuntimeID,
+		arg.Priority,
+		arg.ChatSessionID,
+		arg.AutopilotRunID,
+		arg.TriggerSummary,
+		arg.InitiatorUserID,
+		arg.OriginatorUserID,
+		arg.AccountableUserID,
+		arg.RuleVersionID,
+		arg.OriginatorSource,
+		arg.TriggerEvidenceKind,
+		arg.TriggerEvidenceRefID,
+		arg.ID,
+	)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+		&i.BranchName,
+		&i.DurableWorkDir,
+		&i.ChannelContextRevision,
+		&i.CommentThreadID,
+		&i.CancelledByType,
+		&i.CancelledByID,
+		&i.CancelledByName,
+		&i.IssueSnapshot,
+		&i.WorkflowStep,
+	)
+	return i, err
+}
+
 const createAutopilotRuleVersion = `-- name: CreateAutopilotRuleVersion :one
 
 INSERT INTO autopilot_rule_version (
@@ -1668,6 +1791,39 @@ func (q *Queries) LockAutopilotForUpdate(ctx context.Context, arg LockAutopilotF
 		&i.AssigneeType,
 		&i.ProjectID,
 		&i.PauseReason,
+	)
+	return i, err
+}
+
+const lockAutopilotRunForDispatch = `-- name: LockAutopilotRunForDispatch :one
+SELECT id, autopilot_id, trigger_id, source, status, issue_id, task_id, triggered_at, completed_at, failure_reason, trigger_payload, result, created_at, squad_id, planned_at, webhook_delivery_id, quota_reservation_id, reason_code FROM autopilot_run WHERE id = $1 FOR UPDATE
+`
+
+// Serializes downstream dispatch for one run. A reclaimed webhook delivery or
+// a duplicate manual retry that reaches dispatch while the first caller is
+// still creating its task must observe that task_id and become a no-op.
+func (q *Queries) LockAutopilotRunForDispatch(ctx context.Context, id pgtype.UUID) (AutopilotRun, error) {
+	row := q.db.QueryRow(ctx, lockAutopilotRunForDispatch, id)
+	var i AutopilotRun
+	err := row.Scan(
+		&i.ID,
+		&i.AutopilotID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.IssueID,
+		&i.TaskID,
+		&i.TriggeredAt,
+		&i.CompletedAt,
+		&i.FailureReason,
+		&i.TriggerPayload,
+		&i.Result,
+		&i.CreatedAt,
+		&i.SquadID,
+		&i.PlannedAt,
+		&i.WebhookDeliveryID,
+		&i.QuotaReservationID,
+		&i.ReasonCode,
 	)
 	return i, err
 }

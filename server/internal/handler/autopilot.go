@@ -823,8 +823,8 @@ func (h *Handler) CreateAutopilot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "execution_mode is required")
 		return
 	}
-	if req.ExecutionMode != "create_issue" && req.ExecutionMode != "run_only" {
-		writeError(w, http.StatusBadRequest, "execution_mode must be create_issue or run_only")
+	if req.ExecutionMode != "create_issue" && req.ExecutionMode != "run_only" && req.ExecutionMode != "message" {
+		writeError(w, http.StatusBadRequest, "execution_mode must be create_issue, run_only, or message")
 		return
 	}
 	if req.IssueTitleTemplate != nil {
@@ -1079,6 +1079,10 @@ func (h *Handler) UpdateAutopilot(w http.ResponseWriter, r *http.Request) {
 		params.Status = pgtype.Text{String: *req.Status, Valid: true}
 	}
 	if req.ExecutionMode != nil {
+		if *req.ExecutionMode != "create_issue" && *req.ExecutionMode != "run_only" && *req.ExecutionMode != "message" {
+			writeError(w, http.StatusBadRequest, "execution_mode must be create_issue, run_only, or message")
+			return
+		}
 		params.ExecutionMode = pgtype.Text{String: *req.ExecutionMode, Valid: true}
 	}
 	if _, ok := rawFields["description"]; ok {

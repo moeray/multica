@@ -37,6 +37,7 @@ export function useTypeLabels(): Record<InboxItemType, string> {
     quick_create_unconfirmed: t(($) => $.types.quick_create_unconfirmed),
     autopilot_paused: t(($) => $.types.autopilot_paused),
     autopilot_quota_exceeded: t(($) => $.types.autopilot_quota_exceeded),
+    agent_message: t(($) => $.types.agent_message),
     children_done: t(($) => $.types.children_done),
   };
 }

@@ -658,6 +658,44 @@ describe("ChatMessageList onboarding kickoff", () => {
       screen.queryByText("INTERNAL ONBOARDING PROMPT"),
     ).not.toBeInTheDocument();
   });
+
+  it("hides an autopilot kickoff and renders its agent report", async () => {
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={new QueryClient()}>
+          <ChatMessageList
+            messages={[
+              {
+                id: "autopilot-kickoff",
+                chat_session_id: "s1",
+                role: "user",
+                content: "INTERNAL AUTOPILOT PROMPT",
+                task_id: TASK_ID,
+                created_at: new Date(0).toISOString(),
+                message_kind: "autopilot_kickoff",
+              },
+              {
+                id: "autopilot-report",
+                chat_session_id: "s1",
+                role: "assistant",
+                content: "Daily report body",
+                task_id: TASK_ID,
+                created_at: new Date(1).toISOString(),
+                message_kind: "agent_report",
+              },
+            ]}
+            pendingTask={undefined}
+            availability="online"
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText("Daily report body")).toBeInTheDocument();
+    expect(
+      screen.queryByText("INTERNAL AUTOPILOT PROMPT"),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ChatMessageList channel quote presentation", () => {

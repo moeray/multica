@@ -432,6 +432,12 @@ SET status = 'running', task_id = $2
 WHERE id = $1
 RETURNING *;
 
+-- name: LockAutopilotRunForDispatch :one
+-- Serializes downstream dispatch for one run. A reclaimed webhook delivery or
+-- a duplicate manual retry that reaches dispatch while the first caller is
+-- still creating its task must observe that task_id and become a no-op.
+SELECT * FROM autopilot_run WHERE id = $1 FOR UPDATE;
+
 -- name: UpdateAutopilotRunCompleted :one
 -- Quota safety: only use for a run known to have no reservation. Normal
 -- terminal paths must call UpdateAutopilotRunTerminalWithQuota instead.
@@ -614,6 +620,28 @@ SELECT * FROM agent_task_queue
 WHERE autopilot_run_id = $1
 ORDER BY created_at
 LIMIT 1;
+
+-- name: CreateAutopilotChatTask :one
+-- Message-mode dispatch: enqueue the report as an ordinary chat task inside an
+-- existing conversation, linked to the autopilot run. The task carries no
+-- issue; the caller writes the hidden kickoff user message in the same
+-- transaction and owns it via chat_input_task_id.
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, issue_id, status, priority, chat_session_id,
+    autopilot_run_id, trigger_summary, initiator_user_id,
+    originator_user_id, accountable_user_id, rule_version_id, force_fresh_session,
+    originator_source, trigger_evidence_kind, trigger_evidence_ref_id, id
+)
+SELECT
+    $1, $2, NULL, 'queued', $3, $4,
+    $5, sqlc.narg(trigger_summary), sqlc.narg(initiator_user_id),
+    sqlc.narg(originator_user_id), sqlc.narg(accountable_user_id),
+    sqlc.narg(rule_version_id), FALSE,
+    sqlc.narg(originator_source), sqlc.narg(trigger_evidence_kind),
+    sqlc.narg(trigger_evidence_ref_id),
+    COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+WHERE lock_task_owner_rows($1, NULL, $2)
+RETURNING *;
 
 -- =====================
 -- Run lookup by linked entities

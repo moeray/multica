@@ -29,6 +29,9 @@ export type InboxItemType =
   // same Inbox model so read/archive/realtime behavior remains consistent.
   | "autopilot_paused"
   | "autopilot_quota_exceeded"
+  // A message-mode autopilot report delivered through the inbox because the
+  // recipient had no bound conversation. It carries no issue.
+  | "agent_message"
   // Sub-issues of an issue assigned to the recipient closed (the child_done
   // system rule notifies a member assignee instead of waking an agent).
   | "children_done";

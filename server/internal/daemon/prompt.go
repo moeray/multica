@@ -783,7 +783,11 @@ func channelDisplayName(channelType string) string {
 func buildAutopilotPrompt(task Task) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
-	b.WriteString("This task was triggered by an Autopilot in run-only mode. There is no assigned Multica issue for this run.\n\n")
+	if task.AutopilotExecutionMode == "message" {
+		b.WriteString("This task was triggered by an Autopilot in message mode. There is no assigned Multica issue for this run. Your final output is delivered to the member as a message; do not create an issue.\n\n")
+	} else {
+		b.WriteString("This task was triggered by an Autopilot in run-only mode. There is no assigned Multica issue for this run.\n\n")
+	}
 	fmt.Fprintf(&b, "Autopilot run ID: %s\n", task.AutopilotRunID)
 	if task.AutopilotID != "" {
 		fmt.Fprintf(&b, "Autopilot ID: %s\n", task.AutopilotID)

@@ -967,7 +967,14 @@ export const ChatMessageSchema = z.object({
   failure_reason: z.string().nullable().optional(),
   elapsed_ms: z.number().nullable().optional(),
   message_kind: z
-    .enum(["message", "no_response", "onboarding_kickoff", "onboarding_opening"])
+    .enum([
+      "message",
+      "no_response",
+      "onboarding_kickoff",
+      "onboarding_opening",
+      "autopilot_kickoff",
+      "agent_report",
+    ])
     .catch("message")
     .optional(),
   // Optional additive data degrades independently: a malformed suggestion
@@ -2147,6 +2154,8 @@ const ChatLastMessageSchema = z.object({
     "no_response",
     "onboarding_kickoff",
     "onboarding_opening",
+    "autopilot_kickoff",
+    "agent_report",
   ]).optional().catch(undefined),
 }).loose();
 
