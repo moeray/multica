@@ -32,8 +32,8 @@ func TestChannelChatSessionHistoryMigrationsUpDownUp(t *testing.T) {
 	}
 
 	versions := []string{
-		"592_channel_chat_session_history",
-		"593_channel_chat_active_session_index",
+		"595_channel_chat_session_history",
+		"596_channel_chat_active_session_index",
 	}
 	if err := runMigrations(ctx, pool, migrationOptions(t, schema, "up", versions)); err != nil {
 		t.Fatalf("apply channel binding history migrations: %v", err)
