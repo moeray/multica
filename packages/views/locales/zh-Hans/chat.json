@@ -246,7 +246,21 @@
     "current": "当前",
     "historical": "历史",
     "current_binding": "当前绑定",
-    "historical_session": "历史会话"
+    "historical_session": "历史会话",
+    "change_binding": "更换绑定会话",
+    "binding_dialog": {
+      "description": "新收到的飞书消息会进入所选会话。当前会话会保留为历史，正在进行的回复不会被改写。",
+      "list_aria": "该智能体的活跃会话",
+      "conflict": "已绑定",
+      "empty": "该智能体没有其他活跃会话。",
+      "cancel": "取消",
+      "confirm": "切换绑定",
+      "switching": "切换中...",
+      "conflict_error": "该会话已有 active binding，或飞书路由刚刚发生变化，请重试。",
+      "forbidden_error": "你无权更改此飞书绑定。",
+      "not_found_error": "该会话已不可用。",
+      "generic_error": "切换绑定失败，请重试。"
+    }
   },
   "header": {
     "view_profile": "查看智能体资料",

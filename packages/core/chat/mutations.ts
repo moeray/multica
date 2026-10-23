@@ -337,6 +337,50 @@ export function useSetChatSessionArchived() {
 }
 
 /**
+ * Moves a Feishu p2p route to an existing Chat. Route rotation is owned by the
+ * server: the old binding must be retired and the new one installed in one
+ * transaction, so this mutation never optimistically rewrites either Chat.
+ * Refetching the sessions list after success is what updates both the current
+ * and historical badges together.
+ */
+export function useSwitchChatSessionChannelBinding() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+
+  return useMutation({
+    mutationFn: ({
+      sessionId,
+      installationId,
+      channelChatId,
+    }: {
+      sessionId: string;
+      installationId: string;
+      channelChatId: string;
+    }) =>
+      api.switchChatSessionChannelBinding(sessionId, {
+        installation_id: installationId,
+        channel_chat_id: channelChatId,
+      }),
+    onSuccess: (session) => {
+      logger.info("switchChatSessionChannelBinding.success", {
+        sessionId: session.id,
+        agentId: session.agent_id,
+      });
+    },
+    onError: (err, vars) => {
+      logger.error("switchChatSessionChannelBinding.error", {
+        sessionId: vars.sessionId,
+        err,
+      });
+    },
+    onSettled: (_data, _error, vars) => {
+      qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.session(wsId, vars.sessionId) });
+    },
+  });
+}
+
+/**
  * Hard-deletes a chat session. Optimistically removes the row from the
  * sessions list so the dropdown updates instantly; rolls back on error.
  * The matching `chat:session_deleted` WS event keeps other tabs/devices

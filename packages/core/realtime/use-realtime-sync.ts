@@ -349,6 +349,8 @@ type ChatSessionUpdatedPayload = {
   project_id?: string | null;
   pinned?: boolean;
   status?: "active" | "archived";
+  channel_source?: ChatSessionCreatedPayload["channel_source"];
+  is_current_channel_route?: boolean;
   updated_at?: string;
 };
 
@@ -384,6 +386,12 @@ export function applyChatSessionUpdatedToCache(
             ...("project_id" in payload ? { project_id: payload.project_id } : {}),
             pinned: payload.pinned ?? s.pinned,
             status: payload.status ?? s.status,
+            ...(payload.channel_source !== undefined
+              ? { channel_source: payload.channel_source }
+              : {}),
+            ...(payload.is_current_channel_route !== undefined
+              ? { is_current_channel_route: payload.is_current_channel_route }
+              : {}),
             updated_at: payload.updated_at ?? s.updated_at,
             ...(payload.status === "archived"
               ? { unread_count: 0, has_unread: false }

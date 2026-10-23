@@ -764,7 +764,8 @@ RETURNING *;
 -- chat_session is never treated as a Feishu reply target.
 SELECT * FROM channel_chat_session_binding
 WHERE chat_session_id = sqlc.arg('chat_session_id')
-  AND channel_type = sqlc.arg('channel_type');
+  AND channel_type = sqlc.arg('channel_type')
+  AND retired_at IS NULL;
 
 -- name: GetChannelChatSessionBindingBySessionAny :one
 -- Channel-agnostic reverse lookup: which channel, if any, is behind this
@@ -774,7 +775,7 @@ WHERE chat_session_id = sqlc.arg('chat_session_id')
 -- The channel_type-scoped variant above stays for the outbound senders, which
 -- are per-platform by construction and must not deliver into a foreign one.
 SELECT * FROM channel_chat_session_binding
-WHERE chat_session_id = $1;
+WHERE chat_session_id = $1 AND retired_at IS NULL;
 
 -- name: ListChannelChatSessionBindingsBySessions :many
 -- Batch projection for Chat list responses. Historical bindings are retained,
@@ -782,6 +783,30 @@ WHERE chat_session_id = $1;
 -- reports itself as the current route.
 SELECT * FROM channel_chat_session_binding
 WHERE chat_session_id = ANY(@chat_session_ids::uuid[]);
+
+-- name: CreateActiveChannelChatSessionBinding :one
+-- Reuses an existing Chat as the current route. The caller has already retired
+-- the previous active route in this transaction; route_revision still advances
+-- across that retired history so delivery records remain ordered. The target
+-- Chat's current context generation is preserved, which keeps its transcript
+-- and provider-resume continuity intact.
+WITH next_route AS (
+    SELECT COALESCE(MAX(route_revision) + 1, 1)::bigint AS route_revision
+    FROM channel_chat_session_binding AS existing
+    WHERE existing.installation_id = @installation_id
+      AND existing.channel_chat_id = @channel_chat_id
+)
+INSERT INTO channel_chat_session_binding (
+    chat_session_id, installation_id, channel_type, channel_chat_id, chat_type,
+    config, route_revision, context_revision, history_start_message_id,
+    history_boundary_pending
+)
+SELECT
+    @chat_session_id, @installation_id, @channel_type, @channel_chat_id, @chat_type,
+    @config, next_route.route_revision, @context_revision,
+    sqlc.narg('history_start_message_id'), @history_boundary_pending
+FROM next_route
+RETURNING *;
 
 -- name: UpdateChannelChatSessionBindingReplyTarget :exec
 -- Advances the session's latest-trigger cursor, which drives the history
@@ -793,6 +818,7 @@ WITH current_route AS (
     SELECT current_binding.*
     FROM channel_chat_session_binding AS current_binding
     WHERE current_binding.chat_session_id = sqlc.arg('reply_chat_session_id')
+      AND current_binding.retired_at IS NULL
     FOR UPDATE OF current_binding
 ), closed_previous AS (
     UPDATE channel_chat_session_binding AS previous
@@ -839,7 +865,7 @@ RETURNING pending_fresh;
 -- creates the task. A concurrent `/clear` therefore lands either before this
 -- task and is consumed by it, or after this task and remains for the next one.
 SELECT pending_fresh FROM channel_chat_session_binding
-WHERE chat_session_id = $1
+WHERE chat_session_id = $1 AND retired_at IS NULL
 FOR UPDATE;
 
 -- name: LockChannelChatSessionBindingForContext :one
@@ -847,19 +873,36 @@ FOR UPDATE;
 -- channel_chat_context_generation row. Keeping the statements separate makes
 -- the lock order explicit and identical for append, /clear, and task enqueue.
 SELECT * FROM channel_chat_session_binding
-WHERE chat_session_id = $1
+WHERE chat_session_id = $1 AND retired_at IS NULL
+FOR UPDATE;
+
+-- name: LockChannelChatSessionBindingForTask :one
+-- A debounced channel task carries the binding revision that produced its
+-- input. That route may have been retired by /new or an explicit binding switch
+-- before the task flushes, but its already-sealed input must still enqueue on
+-- the old route. Prefer the exact captured binding; fall back to the Chat's
+-- current active binding only when no binding proof was supplied.
+SELECT * FROM channel_chat_session_binding
+WHERE chat_session_id = @chat_session_id
+  AND (
+    id = sqlc.narg('binding_id')
+    OR retired_at IS NULL
+  )
+ORDER BY (id = sqlc.narg('binding_id')) DESC, retired_at NULLS FIRST
+LIMIT 1
 FOR UPDATE;
 
 -- name: ClearChannelChatSessionPendingFresh :exec
 UPDATE channel_chat_session_binding
 SET pending_fresh = FALSE
-WHERE chat_session_id = $1;
+WHERE chat_session_id = $1 AND retired_at IS NULL;
 
 -- name: ClearChannelChatSessionPendingFreshForRevision :exec
 UPDATE channel_chat_session_binding
 SET pending_fresh = FALSE
 WHERE chat_session_id = @chat_session_id
-  AND context_revision = @revision;
+  AND context_revision = @revision
+  AND retired_at IS NULL;
 
 -- name: AdvanceChannelChatContextGeneration :one
 -- Opens a new agent-visible context while retaining the same Multica Chat.
@@ -943,6 +986,25 @@ WHERE chat_session_id = @chat_session_id
 SELECT * FROM channel_chat_context_generation
 WHERE chat_session_id = @chat_session_id
   AND revision = @revision;
+
+-- name: GetLatestChannelChatContextGeneration :one
+SELECT * FROM channel_chat_context_generation
+WHERE chat_session_id = @chat_session_id
+ORDER BY revision DESC
+LIMIT 1;
+
+-- name: CreateChannelChatContextGeneration :one
+-- A web-only Chat has no channel generation yet. Binding it to a channel starts
+-- at revision 1 with a pending boundary, so the first inbound platform message
+-- is the start of that generation rather than a fabricated pre-binding point.
+INSERT INTO channel_chat_context_generation (
+    chat_session_id, revision, history_boundary_pending
+) VALUES (
+    @chat_session_id, 1, TRUE
+)
+ON CONFLICT (chat_session_id, revision) DO UPDATE
+SET chat_session_id = EXCLUDED.chat_session_id
+RETURNING *;
 
 -- name: DeleteChannelChatSessionBindingBySession :exec
 -- Application-layer integrity (replaces the old chat_session-FK ON DELETE
@@ -1055,7 +1117,8 @@ FROM channel_chat_session_binding AS binding
 JOIN channel_chat_context_generation AS generation
   ON generation.chat_session_id = binding.chat_session_id
  AND generation.revision = @context_revision
-WHERE binding.chat_session_id = @chat_session_id
+WHERE binding.id = @binding_id
+  AND binding.chat_session_id = @chat_session_id
 RETURNING *;
 
 -- name: GetChannelTaskDelivery :one

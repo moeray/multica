@@ -33,6 +33,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { AppLink } from "../../navigation";
 import { useT } from "../../i18n";
 import { ChatChannelBadge, isFeishuChatSession } from "./chat-channel-badge";
+import { ChatChannelBindingDialog } from "./chat-channel-binding-dialog";
 
 /**
  * Per-session header for the conversation pane: agent avatar + editable chat
@@ -44,6 +45,8 @@ export function ChatSessionHeader({
   session,
   agent,
   onArchive,
+  sessions = [],
+  canChangeBinding = false,
 }: {
   session: ChatSession;
   agent: Agent | null;
@@ -51,6 +54,8 @@ export function ChatSessionHeader({
   // next chat on desktop, back to the list on mobile), so the parent owns it —
   // see ChatPage.handleArchive. Falls back to a plain status flip if unwired.
   onArchive?: (session: ChatSession) => void;
+  sessions?: ChatSession[];
+  canChangeBinding?: boolean;
 }) {
   const { t } = useT("chat");
   const wsPaths = useWorkspacePaths();
@@ -212,7 +217,15 @@ export function ChatSessionHeader({
             <ChatChannelBadge
               session={session}
               variant="header"
+              className="max-w-[45%]"
             />
+            {canChangeBinding &&
+              isFeishu &&
+              session.is_current_channel_route === true &&
+              session.channel_source?.installation_id &&
+              session.channel_source.channel_chat_id && (
+                <ChatChannelBindingDialog session={session} sessions={sessions} />
+              )}
           </div>
         )}
       </div>

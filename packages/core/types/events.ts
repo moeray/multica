@@ -555,6 +555,7 @@ export interface ChatSessionCreatedPayload {
   channel_source: {
     channel_type: string;
     installation_id: string;
+    channel_chat_id?: string;
     route_revision: number;
   };
   is_current_channel_route: boolean;

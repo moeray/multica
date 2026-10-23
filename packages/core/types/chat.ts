@@ -80,6 +80,9 @@ export interface ChatLastMessage {
 export interface ChatChannelSource {
   channel_type: string;
   installation_id: string;
+  /** The platform conversation this route delivers to. Optional for older
+   *  servers that only exposed the installation and revision. */
+  channel_chat_id?: string;
   route_revision: number;
 }
 

@@ -2034,7 +2034,21 @@ func (s *TaskService) enqueueChatTaskTx(
 		return db.AgentTaskQueue{}, ErrChatTaskAgentNoRuntime
 	}
 
-	binding, bindingErr := qtx.LockChannelChatSessionBindingForContext(ctx, chatSession.ID)
+	var (
+		binding    db.ChannelChatSessionBinding
+		bindingErr error
+	)
+	if expectedBindingID.Valid {
+		// The debounced flush carries the route that produced its sealed input.
+		// That route may already be retired by /new or an explicit binding
+		// switch; lock it by id instead of only looking for the new active row.
+		binding, bindingErr = qtx.LockChannelChatSessionBindingForTask(ctx, db.LockChannelChatSessionBindingForTaskParams{
+			ChatSessionID: chatSession.ID,
+			BindingID:     expectedBindingID,
+		})
+	} else {
+		binding, bindingErr = qtx.LockChannelChatSessionBindingForContext(ctx, chatSession.ID)
+	}
 	if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
 		return db.AgentTaskQueue{}, fmt.Errorf("lock channel chat binding: %w", bindingErr)
 	}
@@ -2114,7 +2128,7 @@ func (s *TaskService) enqueueChatTaskTx(
 		if _, err := qtx.CreateChannelTaskDeliveryFromSession(
 			ctx, db.CreateChannelTaskDeliveryFromSessionParams{
 				TaskID: task.ID, ChatSessionID: chatSession.ID,
-				ContextRevision: contextRevision,
+				BindingID: binding.ID, ContextRevision: contextRevision,
 			},
 		); err != nil {
 			return db.AgentTaskQueue{}, fmt.Errorf("snapshot channel task delivery: %w", err)

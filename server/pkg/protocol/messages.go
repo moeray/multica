@@ -364,6 +364,7 @@ type ChatSessionCreatedPayload struct {
 type ChatSessionChannelSource struct {
 	ChannelType    string `json:"channel_type"`
 	InstallationID string `json:"installation_id"`
+	ChannelChatID  string `json:"channel_chat_id,omitempty"`
 	RouteRevision  int64  `json:"route_revision"`
 }
 
@@ -389,8 +390,12 @@ type ChatSessionUpdatedPayload struct {
 	Pinned *bool `json:"pinned,omitempty"`
 	// Status is set only by the archive/unarchive path ("active"/"archived");
 	// nil on rename/pin so a receiver leaves the existing status untouched.
-	Status    *string `json:"status,omitempty"`
-	UpdatedAt string  `json:"updated_at"`
+	Status *string `json:"status,omitempty"`
+	// ChannelSource and IsCurrentChannelRoute are set only by a route switch.
+	// A nil field leaves the receiver's cached channel metadata untouched.
+	ChannelSource         *ChatSessionChannelSource `json:"channel_source,omitempty"`
+	IsCurrentChannelRoute *bool                     `json:"is_current_channel_route,omitempty"`
+	UpdatedAt             string                    `json:"updated_at"`
 }
 
 // DaemonHeartbeatRequestPayload is sent from daemon to server over WebSocket

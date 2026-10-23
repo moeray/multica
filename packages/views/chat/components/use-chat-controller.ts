@@ -834,6 +834,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
     // identity / lists
     wsId,
     user,
+    memberRole,
     agents,
     availableAgents,
     agentsSettled,

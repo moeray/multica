@@ -250,7 +250,21 @@
     "current": "Actuel",
     "historical": "Historique",
     "current_binding": "Liaison actuelle",
-    "historical_session": "Session historique"
+    "historical_session": "Session historique",
+    "change_binding": "Changer de discussion liée",
+    "binding_dialog": {
+      "description": "Les nouveaux messages Feishu arriveront dans la discussion choisie. L’actuelle reste disponible dans l’historique et les réponses en cours gardent leur route d’origine.",
+      "list_aria": "Discussions actives de cet agent",
+      "conflict": "Déjà liée",
+      "empty": "Aucune autre discussion active pour cet agent.",
+      "cancel": "Annuler",
+      "confirm": "Changer la liaison",
+      "switching": "Changement...",
+      "conflict_error": "Cette discussion a déjà une liaison active, ou la route Feishu vient de changer. Réessayez.",
+      "forbidden_error": "Vous ne pouvez pas modifier cette liaison Feishu.",
+      "not_found_error": "Cette discussion n’est plus disponible.",
+      "generic_error": "Impossible de changer la liaison. Réessayez."
+    }
   },
   "header": {
     "view_profile": "Voir le profil de l'agent",

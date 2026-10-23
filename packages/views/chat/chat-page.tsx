@@ -261,6 +261,12 @@ export function ChatPage() {
           session={c.currentSession}
           agent={c.activeAgent}
           onArchive={handleArchive}
+          sessions={c.sessions}
+          canChangeBinding={
+            c.currentSession.creator_id === c.user?.id ||
+            c.memberRole === "owner" ||
+            c.memberRole === "admin"
+          }
         />
       )}
       {c.showSkeleton ? (
