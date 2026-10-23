@@ -70,8 +70,13 @@ func (s *MessageSender) Send(ctx context.Context, binding db.ChannelChatSessionB
 	if binding.LastThreadID.Valid {
 		out.ThreadID = binding.LastThreadID.String
 		// Replying to the frozen trigger keeps topic-isolated group messages in
-		// their thread; p2p bindings have no thread and stay chat-level.
-		out.ReplyTo = textValue(binding.LastMessageID)
+		// their thread; p2p bindings have no thread and stay chat-level. Slack
+		// is the exception: its adapter turns ReplyTo into thread_ts, so the
+		// last message would start a new thread instead of continuing the
+		// binding's thread root. ThreadID alone already lands in that thread.
+		if binding.ChannelType != "slack" {
+			out.ReplyTo = textValue(binding.LastMessageID)
+		}
 	}
 	if _, err := adapter.Send(ctx, out); err != nil {
 		return fmt.Errorf("send channel message: %w", err)

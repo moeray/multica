@@ -75,3 +75,35 @@ func TestMessageSenderRejectsRetiredBinding(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoActiveBinding", err)
 	}
 }
+
+func TestMessageSenderSlackThreadUsesThreadRoot(t *testing.T) {
+	ch := &senderTestChannel{}
+	registry := NewRegistry()
+	registry.Register(Type("slack"), func(Config) (Channel, error) { return ch, nil })
+
+	sender := NewMessageSender(registry, senderTestInstallations{installation: db.ChannelInstallation{
+		ID:     pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+		Status: "active",
+		Config: []byte(`{"app_id":"test"}`),
+	}})
+	binding := db.ChannelChatSessionBinding{
+		ChannelType:   "slack",
+		ChannelChatID: "C1",
+		ChatType:      string(ChatTypeGroup),
+		LastMessageID: pgtype.Text{String: "last-reply-ts", Valid: true},
+		LastThreadID:  pgtype.Text{String: "thread-root-ts", Valid: true},
+	}
+
+	if err := sender.Send(context.Background(), binding, db.ChatMessage{Content: "review result"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if ch.sent == nil {
+		t.Fatal("channel did not receive the message")
+	}
+	if ch.sent.ThreadID != "thread-root-ts" {
+		t.Fatalf("ThreadID = %q, want the thread root", ch.sent.ThreadID)
+	}
+	if ch.sent.ReplyTo != "" {
+		t.Fatalf("ReplyTo = %q, want empty: Slack turns it into thread_ts", ch.sent.ReplyTo)
+	}
+}

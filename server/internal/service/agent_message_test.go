@@ -228,6 +228,8 @@ func TestSendReviewResultPersistsDedupesAndDelivers(t *testing.T) {
 		t.Fatalf("load runtime: %v", err)
 	}
 	reviewerID := seedReviewerAgent(t, pool, workspaceID, runtimeID, userID, "reviewer")
+	seedReviewComment(t, pool, workspaceID, issueID, developerID,
+		fmt.Sprintf("[@Reviewer](mention://agent/%s) 请评审。", reviewerID))
 	seedReviewComment(t, pool, workspaceID, issueID, reviewerID, "阻塞项：缺少权限测试。")
 
 	if _, err := pool.Exec(ctx, `
@@ -310,7 +312,14 @@ func TestSendReviewResultWithoutSourceChatFallsBack(t *testing.T) {
 	pool := sharedTestPool(t)
 	ctx := context.Background()
 	q := db.New(pool)
-	workspaceID, _, _, issueID := seedAttributionFixture(t, pool)
+	workspaceID, userID, developerID, issueID := seedAttributionFixture(t, pool)
+	var runtimeID string
+	if err := pool.QueryRow(ctx, `SELECT runtime_id FROM agent WHERE id = $1`, developerID).Scan(&runtimeID); err != nil {
+		t.Fatalf("load runtime: %v", err)
+	}
+	reviewerID := seedReviewerAgent(t, pool, workspaceID, runtimeID, userID, "reviewer")
+	seedReviewComment(t, pool, workspaceID, issueID, developerID,
+		fmt.Sprintf("[@Reviewer](mention://agent/%s) 请评审。", reviewerID))
 	issue, err := q.GetIssue(ctx, util.MustParseUUID(issueID))
 	if err != nil {
 		t.Fatalf("load issue: %v", err)
@@ -319,7 +328,7 @@ func TestSendReviewResultWithoutSourceChatFallsBack(t *testing.T) {
 	_, err = svc.SendReviewResult(ctx, ReviewResultRequest{
 		Issue:     issue,
 		ActorType: "agent",
-		ActorID:   util.UUIDToString(issue.AssigneeID),
+		ActorID:   reviewerID,
 		Passed:    true,
 	})
 	if !errors.Is(err, ErrNoSourceChatSession) {
@@ -343,5 +352,93 @@ func TestSendReviewResultRejectsNonAgent(t *testing.T) {
 	})
 	if !errors.Is(err, ErrReviewResultForbidden) {
 		t.Fatalf("err = %v, want ErrReviewResultForbidden", err)
+	}
+}
+
+func TestSendReviewResultRejectsNonReviewerAgent(t *testing.T) {
+	pool := sharedTestPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	workspaceID, userID, developerID, issueID := seedAttributionFixture(t, pool)
+	var runtimeID string
+	if err := pool.QueryRow(ctx, `SELECT runtime_id FROM agent WHERE id = $1`, developerID).Scan(&runtimeID); err != nil {
+		t.Fatalf("load runtime: %v", err)
+	}
+	reviewerID := seedReviewerAgent(t, pool, workspaceID, runtimeID, userID, "reviewer")
+	intruderID := seedReviewerAgent(t, pool, workspaceID, runtimeID, userID, "intruder")
+	seedReviewComment(t, pool, workspaceID, issueID, developerID,
+		fmt.Sprintf("[@Reviewer](mention://agent/%s) 请评审。", reviewerID))
+
+	_, sessionID := seedLarkP2PSession(t, pool, workspaceID, developerID, userID)
+	if _, err := pool.Exec(ctx, `
+		UPDATE issue SET origin_type = 'lark_chat', origin_id = $1, status = 'done', revision = revision + 1
+		WHERE id = $2`, sessionID, issueID); err != nil {
+		t.Fatalf("stamp issue origin: %v", err)
+	}
+	issue, err := q.GetIssue(ctx, util.MustParseUUID(issueID))
+	if err != nil {
+		t.Fatalf("load issue: %v", err)
+	}
+
+	svc := NewAgentMessageService(q, events.New(), nil, "")
+	_, err = svc.SendReviewResult(ctx, ReviewResultRequest{
+		Issue:     issue,
+		ActorType: "agent",
+		ActorID:   intruderID,
+		Passed:    true,
+	})
+	if !errors.Is(err, ErrReviewResultForbidden) {
+		t.Fatalf("err = %v, want ErrReviewResultForbidden", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM chat_message
+		WHERE chat_session_id = $1 AND message_kind = 'review_result'`, sessionID).Scan(&count); err != nil {
+		t.Fatalf("count review messages: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("review_result rows written by a non-reviewer = %d, want 0", count)
+	}
+}
+
+func TestIsIssueReviewerRequiresHandoffMention(t *testing.T) {
+	pool := sharedTestPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	workspaceID, userID, developerID, issueID := seedAttributionFixture(t, pool)
+	var runtimeID string
+	if err := pool.QueryRow(ctx, `SELECT runtime_id FROM agent WHERE id = $1`, developerID).Scan(&runtimeID); err != nil {
+		t.Fatalf("load runtime: %v", err)
+	}
+	reviewerID := seedReviewerAgent(t, pool, workspaceID, runtimeID, userID, "reviewer")
+	otherAgentID := seedReviewerAgent(t, pool, workspaceID, runtimeID, userID, "other")
+	issue, err := q.GetIssue(ctx, util.MustParseUUID(issueID))
+	if err != nil {
+		t.Fatalf("load issue: %v", err)
+	}
+
+	reviewer, err := IsIssueReviewer(ctx, q, issue, reviewerID)
+	if err != nil || reviewer {
+		t.Fatalf("without a handoff comment = (%v, %v), want false", reviewer, err)
+	}
+
+	seedReviewComment(t, pool, workspaceID, issueID, developerID,
+		fmt.Sprintf("[@Reviewer](mention://agent/%s) 请评审。", reviewerID))
+
+	reviewer, err = IsIssueReviewer(ctx, q, issue, reviewerID)
+	if err != nil || !reviewer {
+		t.Fatalf("mentioned reviewer = (%v, %v), want true", reviewer, err)
+	}
+	reviewer, err = IsIssueReviewer(ctx, q, issue, otherAgentID)
+	if err != nil || reviewer {
+		t.Fatalf("unmentioned agent = (%v, %v), want false", reviewer, err)
+	}
+	reviewer, err = IsIssueReviewer(ctx, q, issue, util.UUIDToString(issue.AssigneeID))
+	if err != nil || reviewer {
+		t.Fatalf("assignee = (%v, %v), want false", reviewer, err)
+	}
+	reviewer, err = IsIssueReviewer(ctx, q, issue, userID)
+	if err != nil || reviewer {
+		t.Fatalf("member = (%v, %v), want false", reviewer, err)
 	}
 }

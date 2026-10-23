@@ -22,8 +22,9 @@ type reviewResultDispatch struct {
 }
 
 // dispatchReviewResult turns the reviewer's status transition out of in_review
-// into one chat message. The actor must be an agent other than the issue's
-// assignee (the developer); this is the workflow's reviewer signal.
+// into one chat message. The actor must be the agent the assignee (developer)
+// named in their newest handoff comment; this is the workflow's reviewer
+// signal.
 func (h *Handler) dispatchReviewResult(
 	ctx context.Context,
 	prevIssue db.Issue,
@@ -56,9 +57,17 @@ func (h *Handler) dispatchReviewResult(
 	if prevIssue.Status != "in_review" || actorType != "agent" {
 		return reviewResultDispatch{}
 	}
-	if issue.AssigneeID.Valid && actorID == uuidToString(issue.AssigneeID) {
-		// The developer moving their own work out of review is not a review
-		// verdict.
+	// Only the reviewer the developer handed off to may publish a verdict.
+	// The handoff is the assignee agent's newest comment; an agent that was
+	// not mentioned there is not a reviewer, so this stays on the existing
+	// issue notification path instead of emitting a forged result.
+	reviewer, err := service.IsIssueReviewer(ctx, h.Queries, issue, actorID)
+	if err != nil {
+		slog.Warn("review result: resolve reviewer failed; keeping existing issue notification",
+			"issue_id", uuidToString(issue.ID), "error", err)
+		return reviewResultDispatch{}
+	}
+	if !reviewer {
 		return reviewResultDispatch{}
 	}
 	if issue.Status == "cancelled" {

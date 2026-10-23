@@ -119,6 +119,48 @@ type ReviewResultResult struct {
 	Delivered bool
 }
 
+// IsIssueReviewer reports whether agentID is the reviewer the issue's assignee
+// handed off to. The handoff is the assignee agent's newest comment, and only
+// agents @mentioned there are reviewers. A missing handoff comment means no
+// reviewer: callers fall back to the existing issue notification path instead
+// of guessing.
+func IsIssueReviewer(ctx context.Context, q *db.Queries, issue db.Issue, agentID string) (bool, error) {
+	if q == nil {
+		return false, nil
+	}
+	id, err := util.ParseUUID(agentID)
+	if err != nil || !id.Valid {
+		return false, nil
+	}
+	if issue.AssigneeType.String != "agent" || !issue.AssigneeID.Valid || id == issue.AssigneeID {
+		return false, nil
+	}
+
+	comment, err := q.GetLatestCommentByAuthor(ctx, db.GetLatestCommentByAuthorParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		AuthorType:  "agent",
+		AuthorID:    issue.AssigneeID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load handoff comment: %w", err)
+	}
+
+	for _, mention := range util.ParseMentions(comment.Content) {
+		if mention.Type != "agent" {
+			continue
+		}
+		mentionedID, err := util.ParseUUID(mention.ID)
+		if err == nil && mentionedID == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // SendReviewResult writes one idempotent review_result message into the issue's
 // source chat. The reviewer's latest issue comment supplies the conclusion
 // body; the issue link stays clickable in the chat.
@@ -132,6 +174,14 @@ func (s *AgentMessageService) SendReviewResult(ctx context.Context, req ReviewRe
 	}
 	if s == nil || s.Queries == nil {
 		return ReviewResultResult{}, errors.New("agent message service is not configured")
+	}
+
+	reviewer, err := IsIssueReviewer(ctx, s.Queries, req.Issue, req.ActorID)
+	if err != nil {
+		return ReviewResultResult{}, err
+	}
+	if !reviewer {
+		return ReviewResultResult{}, ErrReviewResultForbidden
 	}
 
 	session, err := ResolveIssueChatSession(ctx, s.Queries, req.Issue)
