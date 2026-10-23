@@ -483,7 +483,7 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 				r.tasks.FinalizeChatTaskEnqueue(ctx, startedTask)
 				startTaskCommitted = true
 			}
-			r.notifyChatStarted(inst, sessionCreator, msg.Source.ChannelType, started)
+			r.notifyChatStarted(inst, sessionCreator, msg.Source.ChannelType, msg.Source.ChatType, started)
 			if !persistStartedMessage {
 				finalize := finalizeMark
 				if appendRes.DedupMarked {
@@ -696,7 +696,7 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 	}
 	if appendRes.BecameVisible && !startChat {
 		r.notifyChatCreated(
-			inst, sessionCreator, msg.Source.ChannelType, sessionID,
+			inst, sessionCreator, msg.Source.ChannelType, msg.Source.ChatType, sessionID,
 			appendRes.RouteRevision, appendRes.InitialTitle,
 		)
 	}
@@ -709,19 +709,20 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 	return res, postAppendFinalize, nil
 }
 
-func (r *Router) notifyChatStarted(inst ResolvedInstallation, creatorID pgtype.UUID, channelType channel.Type, started StartSessionResult) {
+func (r *Router) notifyChatStarted(inst ResolvedInstallation, creatorID pgtype.UUID, channelType channel.Type, chatType channel.ChatType, started StartSessionResult) {
 	r.notifyChatCreated(
-		inst, creatorID, channelType, started.SessionID,
+		inst, creatorID, channelType, chatType, started.SessionID,
 		started.RouteRevision, started.Append.InitialTitle,
 	)
 }
 
-func (r *Router) notifyChatCreated(inst ResolvedInstallation, creatorID pgtype.UUID, channelType channel.Type, sessionID pgtype.UUID, routeRevision int64, title string) {
+func (r *Router) notifyChatCreated(inst ResolvedInstallation, creatorID pgtype.UUID, channelType channel.Type, chatType channel.ChatType, sessionID pgtype.UUID, routeRevision int64, title string) {
 	if r.lifecycle != nil {
 		r.lifecycle.ChannelChatStarted(ChannelChatStartedEvent{
 			WorkspaceID: inst.WorkspaceID, CreatorID: creatorID, AgentID: inst.AgentID,
 			SessionID: sessionID, InstallationID: inst.ID,
-			ChannelType: channelType, RouteRevision: routeRevision, Title: title,
+			ChannelType: channelType, ChatType: chatType,
+			RouteRevision: routeRevision, Title: title,
 		})
 	}
 }

@@ -28,7 +28,8 @@ func (h *Handler) ChannelChatStarted(event engine.ChannelChatStartedEvent) {
 	h.publishChat(protocol.EventChatSessionCreated, ws, "member", user, session, protocol.ChatSessionCreatedPayload{
 		WorkspaceID: ws, ChatSessionID: session, AgentID: uuidToString(event.AgentID), CreatorID: user, Title: event.Title,
 		ChannelSource: protocol.ChatSessionChannelSource{
-			ChannelType: string(event.ChannelType), InstallationID: uuidToString(event.InstallationID), RouteRevision: event.RouteRevision,
+			ChannelType: string(event.ChannelType), ChatType: string(event.ChatType),
+			InstallationID: uuidToString(event.InstallationID), RouteRevision: event.RouteRevision,
 		},
 		IsCurrentChannelRoute: true,
 	})

@@ -554,6 +554,7 @@ export interface ChatSessionCreatedPayload {
   title: string;
   channel_source: {
     channel_type: string;
+    chat_type?: string;
     installation_id: string;
     channel_chat_id?: string;
     route_revision: number;

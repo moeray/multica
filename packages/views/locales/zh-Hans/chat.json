@@ -256,7 +256,7 @@
       "cancel": "取消",
       "confirm": "切换绑定",
       "switching": "切换中...",
-      "conflict_error": "该会话已有 active binding，或飞书路由刚刚发生变化，请重试。",
+      "conflict_error": "该会话已有当前绑定，或飞书路由刚刚发生变化，请重试。",
       "forbidden_error": "你无权更改此飞书绑定。",
       "not_found_error": "该会话已不可用。",
       "generic_error": "切换绑定失败，请重试。"

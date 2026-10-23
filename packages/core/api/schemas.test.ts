@@ -122,6 +122,7 @@ describe("ChatSessionSchema", () => {
       ...baseSession,
       channel_source: {
         channel_type: "slack",
+        chat_type: "group",
         installation_id: "installation-1",
         channel_chat_id: "C123:thread",
         route_revision: 3,
@@ -130,6 +131,7 @@ describe("ChatSessionSchema", () => {
     });
     expect(parsed.channel_source).toEqual({
       channel_type: "slack",
+      chat_type: "group",
       installation_id: "installation-1",
       channel_chat_id: "C123:thread",
       route_revision: 3,

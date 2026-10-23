@@ -148,6 +148,7 @@ WITH closed AS (
         pending_fresh = TRUE
     WHERE binding.chat_session_id = $2
       AND binding.context_revision = $3
+      AND binding.retired_at IS NULL
     RETURNING binding.id, binding.chat_session_id, binding.installation_id, binding.channel_type, binding.channel_chat_id, binding.chat_type, binding.last_message_id, binding.last_thread_id, binding.config, binding.created_at, binding.pending_fresh, binding.context_revision, binding.route_revision, binding.retired_at, binding.history_start_message_id, binding.history_end_message_id, binding.history_boundary_pending
 ), opened AS (
     INSERT INTO channel_chat_context_generation (
@@ -1796,15 +1797,19 @@ func (q *Queries) GetChannelChatSessionBindingBySession(ctx context.Context, arg
 
 const getChannelChatSessionBindingBySessionAny = `-- name: GetChannelChatSessionBindingBySessionAny :one
 SELECT id, chat_session_id, installation_id, channel_type, channel_chat_id, chat_type, last_message_id, last_thread_id, config, created_at, pending_fresh, context_revision, route_revision, retired_at, history_start_message_id, history_end_message_id, history_boundary_pending FROM channel_chat_session_binding
-WHERE chat_session_id = $1 AND retired_at IS NULL
+WHERE chat_session_id = $1
+ORDER BY (retired_at IS NULL) DESC, route_revision DESC, created_at DESC
+LIMIT 1
 `
 
-// Channel-agnostic reverse lookup: which channel, if any, is behind this
-// chat_session? UNIQUE (chat_session_id) guarantees at most one row, so a
-// caller that only needs to READ the binding never has to name the channel it
-// is hoping for — and therefore cannot go blind on a channel added later.
-// The channel_type-scoped variant above stays for the outbound senders, which
-// are per-platform by construction and must not deliver into a foreign one.
+// Channel-agnostic reverse lookup for readers: which channel, if any, is
+// behind this chat_session? A Chat may keep historical bindings, so prefer the
+// active route and otherwise return the newest retired one. Callers that only
+// need to READ the binding never have to name the channel they are hoping for
+// — and therefore cannot go blind on a channel added later. The
+// channel_type-scoped variant above stays for the outbound senders, which are
+// per-platform by construction, need the ACTIVE route, and must not deliver
+// into a foreign one.
 func (q *Queries) GetChannelChatSessionBindingBySessionAny(ctx context.Context, chatSessionID pgtype.UUID) (ChannelChatSessionBinding, error) {
 	row := q.db.QueryRow(ctx, getChannelChatSessionBindingBySessionAny, chatSessionID)
 	var i ChannelChatSessionBinding

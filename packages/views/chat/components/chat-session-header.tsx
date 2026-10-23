@@ -222,6 +222,7 @@ export function ChatSessionHeader({
             {canChangeBinding &&
               isFeishu &&
               session.is_current_channel_route === true &&
+              session.channel_source?.chat_type === "p2p" &&
               session.channel_source?.installation_id &&
               session.channel_source.channel_chat_id && (
                 <ChatChannelBindingDialog session={session} sessions={sessions} />

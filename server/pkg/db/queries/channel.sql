@@ -768,14 +768,18 @@ WHERE chat_session_id = sqlc.arg('chat_session_id')
   AND retired_at IS NULL;
 
 -- name: GetChannelChatSessionBindingBySessionAny :one
--- Channel-agnostic reverse lookup: which channel, if any, is behind this
--- chat_session? UNIQUE (chat_session_id) guarantees at most one row, so a
--- caller that only needs to READ the binding never has to name the channel it
--- is hoping for — and therefore cannot go blind on a channel added later.
--- The channel_type-scoped variant above stays for the outbound senders, which
--- are per-platform by construction and must not deliver into a foreign one.
+-- Channel-agnostic reverse lookup for readers: which channel, if any, is
+-- behind this chat_session? A Chat may keep historical bindings, so prefer the
+-- active route and otherwise return the newest retired one. Callers that only
+-- need to READ the binding never have to name the channel they are hoping for
+-- — and therefore cannot go blind on a channel added later. The
+-- channel_type-scoped variant above stays for the outbound senders, which are
+-- per-platform by construction, need the ACTIVE route, and must not deliver
+-- into a foreign one.
 SELECT * FROM channel_chat_session_binding
-WHERE chat_session_id = $1 AND retired_at IS NULL;
+WHERE chat_session_id = $1
+ORDER BY (retired_at IS NULL) DESC, route_revision DESC, created_at DESC
+LIMIT 1;
 
 -- name: ListChannelChatSessionBindingsBySessions :many
 -- Batch projection for Chat list responses. Historical bindings are retained,
@@ -919,6 +923,7 @@ WITH closed AS (
         pending_fresh = TRUE
     WHERE binding.chat_session_id = @chat_session_id
       AND binding.context_revision = @current_revision
+      AND binding.retired_at IS NULL
     RETURNING binding.*
 ), opened AS (
     INSERT INTO channel_chat_context_generation (

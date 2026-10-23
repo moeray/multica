@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/integrations/channel"
+	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -200,6 +202,7 @@ func TestSwitchChatSessionChannelBinding_MovesRouteAndPreservesTarget(t *testing
 		t.Fatalf("decode switch response: %v", err)
 	}
 	if response.ID != fixture.targetID || response.ChannelSource == nil ||
+		response.ChannelSource.ChatType != "p2p" ||
 		response.ChannelSource.ChannelChatID != fixture.sourceRoute ||
 		response.ChannelSource.RouteRevision != 2 ||
 		response.IsCurrentChannelRoute == nil || !*response.IsCurrentChannelRoute {
@@ -344,6 +347,52 @@ func TestSwitchChatSessionChannelBinding_AllowsRetiredRouteTaskToFinish(t *testi
 	}
 }
 
+func TestSwitchChatSessionChannelBinding_ThenClearAdvancesOnlyTheActiveRoute(t *testing.T) {
+	fixture := newChannelBindingFixture(t, "clear-after-switch")
+	if w := switchChannelBindingRequest(t, testUserID, fixture.targetID, fixture.installationID, fixture.sourceRoute); w.Code != http.StatusOK {
+		t.Fatalf("switch: %d %s", w.Code, w.Body.String())
+	}
+
+	// The target now has an active and a retired binding on the same context
+	// revision. A /clear must advance only the active route, or the generation
+	// INSERT produces two rows for the same (chat_session_id, revision).
+	session := engine.NewChatSession(testHandler.Queries, testHandler.TxStarter, channel.Type("feishu"), engine.SessionTitles{})
+	if _, err := session.AppendUserMessage(context.Background(), engine.AppendInput{
+		SessionID:      util.MustParseUUID(fixture.targetID),
+		Sender:         util.MustParseUUID(testUserID),
+		InstallationID: util.MustParseUUID(fixture.installationID),
+		Body:           "/clear",
+		CommandText:    "/clear",
+		ForceFresh:     true,
+		MessageID:      "om_clear_after_switch",
+	}); err != nil {
+		t.Fatalf("clear after switch: %v", err)
+	}
+
+	var activeRevision, retiredRevision, generationCount int64
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT context_revision FROM channel_chat_session_binding
+			  WHERE chat_session_id = $1 AND retired_at IS NULL),
+			(SELECT context_revision FROM channel_chat_session_binding
+			  WHERE chat_session_id = $1 AND retired_at IS NOT NULL
+			  ORDER BY route_revision DESC LIMIT 1),
+			(SELECT count(*) FROM channel_chat_context_generation
+			  WHERE chat_session_id = $1 AND revision = 3)
+	`, fixture.targetID).Scan(&activeRevision, &retiredRevision, &generationCount); err != nil {
+		t.Fatalf("read context after clear: %v", err)
+	}
+	if activeRevision != 3 {
+		t.Errorf("active binding context revision = %d, want 3", activeRevision)
+	}
+	if retiredRevision != 2 {
+		t.Errorf("retired binding context revision = %d, want 2", retiredRevision)
+	}
+	if generationCount != 1 {
+		t.Errorf("generation rows for revision 3 = %d, want 1", generationCount)
+	}
+}
+
 func TestSwitchChatSessionChannelBinding_RejectsConflictsAndUnauthorizedCallers(t *testing.T) {
 	fixture := newChannelBindingFixture(t, "reject")
 	ctx := context.Background()
@@ -444,6 +493,68 @@ func TestSwitchChatSessionChannelBinding_RejectsConflictsAndUnauthorizedCallers(
 	}
 	if w := switchChannelBindingRequest(t, testUserID, fixture.targetID, fixture.installationID, fixture.sourceRoute); w.Code != http.StatusBadRequest {
 		t.Fatalf("inactive installation: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSwitchChatSessionChannelBinding_RequiresOwnershipOfBothSessions(t *testing.T) {
+	t.Run("source creator can move their own route to their own chat", func(t *testing.T) {
+		fixture := newChannelBindingFixture(t, "owner-both")
+		memberID := createChatBindingUser(t, "member")
+		ctx := context.Background()
+		if _, err := testPool.Exec(ctx, `
+			UPDATE chat_session SET creator_id = $2 WHERE id IN ($1, $3)
+		`, fixture.sourceID, memberID, fixture.targetID); err != nil {
+			t.Fatalf("assign both chats to member: %v", err)
+		}
+
+		if w := switchChannelBindingRequest(t, memberID, fixture.targetID, fixture.installationID, fixture.sourceRoute); w.Code != http.StatusOK {
+			t.Fatalf("source creator switch: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("source creator cannot move the route into another member's chat", func(t *testing.T) {
+		fixture := newChannelBindingFixture(t, "owner-source-only")
+		memberID := createChatBindingUser(t, "member")
+		ctx := context.Background()
+		if _, err := testPool.Exec(ctx, `
+			UPDATE chat_session SET creator_id = $2 WHERE id = $1
+		`, fixture.sourceID, memberID); err != nil {
+			t.Fatalf("assign source chat to member: %v", err)
+		}
+
+		if w := switchChannelBindingRequest(t, memberID, fixture.targetID, fixture.installationID, fixture.sourceRoute); w.Code != http.StatusForbidden {
+			t.Fatalf("source creator with foreign target: expected 403, got %d: %s", w.Code, w.Body.String())
+		}
+		assertChannelBindingStillActive(t, fixture.sourceBinding)
+	})
+
+	t.Run("target creator cannot take another member's route", func(t *testing.T) {
+		fixture := newChannelBindingFixture(t, "owner-target-only")
+		memberID := createChatBindingUser(t, "member")
+		ctx := context.Background()
+		if _, err := testPool.Exec(ctx, `
+			UPDATE chat_session SET creator_id = $2 WHERE id = $1
+		`, fixture.targetID, memberID); err != nil {
+			t.Fatalf("assign target chat to member: %v", err)
+		}
+
+		if w := switchChannelBindingRequest(t, memberID, fixture.targetID, fixture.installationID, fixture.sourceRoute); w.Code != http.StatusForbidden {
+			t.Fatalf("target creator with foreign source: expected 403, got %d: %s", w.Code, w.Body.String())
+		}
+		assertChannelBindingStillActive(t, fixture.sourceBinding)
+	})
+}
+
+func assertChannelBindingStillActive(t *testing.T, bindingID string) {
+	t.Helper()
+	var active bool
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT retired_at IS NULL FROM channel_chat_session_binding WHERE id = $1
+	`, bindingID).Scan(&active); err != nil {
+		t.Fatalf("read binding after denied switch: %v", err)
+	}
+	if !active {
+		t.Fatal("denied switch retired the source binding")
 	}
 }
 

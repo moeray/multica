@@ -203,6 +203,7 @@ describe("ChatSessionHeader rename keyboard behavior", () => {
 describe("ChatSessionHeader Feishu channel state", () => {
   const channelSource = {
     channel_type: "feishu",
+    chat_type: "p2p",
     installation_id: "installation-1",
     route_revision: 1,
   };
@@ -255,6 +256,21 @@ describe("ChatSessionHeader Feishu channel state", () => {
     expect(
       screen.getByRole("button", { name: enChat.channel.change_binding }),
     ).toBeInTheDocument();
+  });
+
+  it("does not offer binding changes for a Feishu group chat", () => {
+    renderHeader(
+      {
+        ...session,
+        channel_source: { ...channelSource, chat_type: "group", channel_chat_id: "chat-1" },
+        is_current_channel_route: true,
+      },
+      { canChangeBinding: true },
+    );
+
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.change_binding }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps historical and read-only Feishu routes free of the switch action", () => {

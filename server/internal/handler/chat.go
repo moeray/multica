@@ -94,10 +94,6 @@ func (h *Handler) SwitchChatSessionChannelBinding(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "chat session is archived")
 		return
 	}
-	if uuidToString(target.CreatorID) != userID && !roleAllowed(member.Role, "owner", "admin") {
-		writeError(w, http.StatusForbidden, "insufficient permissions")
-		return
-	}
 	// Command-only channel sessions are internal control-plane records, not
 	// public Chats. They must not become an interactive Feishu destination.
 	if _, err := h.Queries.GetPublicChatSessionInWorkspace(r.Context(), db.GetPublicChatSessionInWorkspaceParams{
@@ -158,6 +154,15 @@ func (h *Handler) SwitchChatSessionChannelBinding(w http.ResponseWriter, r *http
 	})
 	if err != nil {
 		writeError(w, http.StatusConflict, "Feishu binding changed; retry")
+		return
+	}
+	// The route belongs to the source Chat, not to whichever Chat the caller
+	// picked as its destination. Authorizing on the target alone lets a member
+	// who can create a Chat redirect someone else's Feishu conversation into it.
+	// A non-admin must own both ends; owners/admins may move any route.
+	if !roleAllowed(member.Role, "owner", "admin") &&
+		(uuidToString(source.CreatorID) != userID || uuidToString(target.CreatorID) != userID) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
@@ -2197,6 +2202,7 @@ type ChatSessionResponse struct {
 
 type ChatSessionChannelSourceResponse struct {
 	ChannelType    string `json:"channel_type"`
+	ChatType       string `json:"chat_type,omitempty"`
 	InstallationID string `json:"installation_id"`
 	ChannelChatID  string `json:"channel_chat_id"`
 	RouteRevision  int64  `json:"route_revision"`
@@ -2229,8 +2235,9 @@ func (h *Handler) hydrateChatSessionChannelMetadata(ctx context.Context, session
 		}
 		current := !binding.RetiredAt.Valid
 		sessions[i].ChannelSource = &ChatSessionChannelSourceResponse{
-			ChannelType: binding.ChannelType, InstallationID: uuidToString(binding.InstallationID),
-			ChannelChatID: binding.ChannelChatID, RouteRevision: binding.RouteRevision,
+			ChannelType: binding.ChannelType, ChatType: binding.ChatType,
+			InstallationID: uuidToString(binding.InstallationID),
+			ChannelChatID:  binding.ChannelChatID, RouteRevision: binding.RouteRevision,
 		}
 		sessions[i].IsCurrentChannelRoute = &current
 	}
@@ -2259,6 +2266,7 @@ func (h *Handler) publishChatSessionChannelMetadata(workspaceID, userID string, 
 	if response.ChannelSource != nil {
 		payload.ChannelSource = &protocol.ChatSessionChannelSource{
 			ChannelType:    response.ChannelSource.ChannelType,
+			ChatType:       response.ChannelSource.ChatType,
 			InstallationID: response.ChannelSource.InstallationID,
 			ChannelChatID:  response.ChannelSource.ChannelChatID,
 			RouteRevision:  response.ChannelSource.RouteRevision,

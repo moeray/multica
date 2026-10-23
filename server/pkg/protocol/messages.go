@@ -363,6 +363,7 @@ type ChatSessionCreatedPayload struct {
 
 type ChatSessionChannelSource struct {
 	ChannelType    string `json:"channel_type"`
+	ChatType       string `json:"chat_type,omitempty"`
 	InstallationID string `json:"installation_id"`
 	ChannelChatID  string `json:"channel_chat_id,omitempty"`
 	RouteRevision  int64  `json:"route_revision"`
