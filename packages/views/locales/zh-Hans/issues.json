@@ -712,6 +712,7 @@
     "status_waiting_local_directory": "等待本地目录释放",
     "status_running": "正在工作",
     "status_completed": "已完成",
+    "cleanup_warning": "已交付，但清理失败",
     "status_failed": "失败",
     "status_cancelled": "已取消",
     "attribution": {

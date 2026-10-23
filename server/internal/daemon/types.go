@@ -305,7 +305,8 @@ type TaskResult struct {
 	SessionID  string `json:"session_id,omitempty"` // Claude session ID for future resumption
 	WorkDir    string `json:"work_dir,omitempty"`   // working directory used during execution
 	// DurableWorkDir replaces WorkDir only after a disposable local worktree
-	// was finalized and its removal was confirmed. Empty keeps WorkDir authoritative.
+	// was finalized. Empty keeps WorkDir authoritative. Cleanup residue may
+	// remain when CleanupWarning is set; the branch is still the deliverable.
 	DurableWorkDir string `json:"durable_work_dir,omitempty"`
 	EnvRoot        string `json:"-"` // env root dir for writing GC metadata (not sent to server)
 	FailureReason  string `json:"-"` // classifier forwarded to FailTask on the blocked path; empty falls back to 'agent_error'
@@ -318,8 +319,12 @@ type TaskResult struct {
 	// abandoned as unresumable (GH #6066). Forwarded on every terminal path,
 	// including the completed one: a fresh-session retry that SUCCEEDS is
 	// precisely when the abandoned id would otherwise stay selectable.
-	RetiredSessionID string           `json:"-"`
-	Usage            []TaskUsageEntry `json:"usage,omitempty"` // per-model token usage
+	RetiredSessionID string `json:"-"`
+	// CleanupWarning is set when a completed run delivered its work but the
+	// disposable task worktree could not be fully removed. It rides the
+	// completion callback as a warning, never as a failure.
+	CleanupWarning string           `json:"-"`
+	Usage          []TaskUsageEntry `json:"usage,omitempty"` // per-model token usage
 }
 
 // PluginHookTool is one agent-trigger plugin hook, as the agent will see it.

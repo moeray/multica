@@ -761,6 +761,9 @@
     "details_cost": "費用",
     "usage_chip_title": "この実行のトークンと推定費用",
     "details_branch": "ブランチ",
+    "cleanup_warning_chip": "配信済み、クリーンアップ失敗",
+    "cleanup_warning_body": "ブランチとコミットは配信されました。一時ワークツリーを完全に削除できませんでした。残ったファイルは手動で削除できます。",
+    "details_cleanup_warning": "クリーンアップの警告",
     "details_reason": "理由",
     "details_diagnostics": "技術的な詳細",
     "copy_branch": "ブランチ名をコピー",
@@ -797,6 +800,7 @@
   "task_failure": {
     "cancelled_by_system": "システムによってキャンセルされました",
     "cancelled_by_actor": "{{name}} がキャンセル",
+    "cleanup_warning": "配信済み、ワークツリーのクリーンアップに失敗しました",
     "reasons": {
       "queued_expired": "キュー内で期限切れになりました",
       "runtime_offline": "デーモンがオフライン",

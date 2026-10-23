@@ -712,6 +712,7 @@
     "status_waiting_local_directory": "ローカルディレクトリ待機中",
     "status_running": "作業中",
     "status_completed": "完了",
+    "cleanup_warning": "配信済み、クリーンアップ失敗",
     "status_failed": "失敗",
     "status_cancelled": "キャンセル済み",
     "attribution": {

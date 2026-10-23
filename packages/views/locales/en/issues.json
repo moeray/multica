@@ -740,6 +740,7 @@
     "status_waiting_local_directory": "Waiting for local directory",
     "status_running": "Working",
     "status_completed": "Completed",
+    "cleanup_warning": "Delivered; cleanup failed",
     "status_failed": "Failed",
     "status_cancelled": "Cancelled",
     "attribution": {

@@ -27,6 +27,7 @@ import {
   Info,
   Coins,
   GitBranch,
+  TriangleAlert,
 } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import { copyText } from "@multica/ui/lib/clipboard";
@@ -44,7 +45,12 @@ import {
 import { ActorAvatar } from "../actor-avatar";
 import { AttributionBadge } from "../../issues/components/attribution-badge";
 import { plainTriggerSummary } from "../../issues/components/task-run-labels";
-import { cancellationActorLabel, cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
+import {
+  cancellationActorLabel,
+  cancelReasonLabel,
+  failureReasonLabel,
+  hasCleanupWarning,
+} from "../../agents/components/tabs/task-failure";
 import { RichContent } from "../../rich-content";
 import { api } from "@multica/core/api";
 import {
@@ -851,10 +857,13 @@ export function AgentTranscriptDialog({
     task.status === "failed"
       ? failureReasonLabel(task.failure_reason, t)
       : cancelReasonLabel(task, t);
+  const showCleanupWarning = hasCleanupWarning(task);
+  const cleanupWarning = task.cleanup_warning?.trim() ?? "";
   const hasRunDetails =
     !!runtimeInfo ||
     !!workdirCopyTarget?.relativePath ||
     !!task.branch_name ||
+    showCleanupWarning ||
     !!reasonLabel ||
     !!task.error ||
     !!createdLabel ||
@@ -878,6 +887,12 @@ export function AgentTranscriptDialog({
         <div className="border-b px-4 py-3 shrink-0">
           <div className="flex min-w-0 items-center gap-3">
             {statusBadge}
+            {showCleanupWarning && (
+              <span className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-micro font-medium text-warning">
+                <TriangleAlert aria-hidden="true" className="h-3 w-3" />
+                {t(($) => $.transcript.cleanup_warning_chip)}
+              </span>
+            )}
             {/* Primary identity: the agent that ran this. It is the one
                 foreground entity — avatar + medium weight. */}
             <div className="flex min-w-0 items-center gap-2">
@@ -1004,6 +1019,13 @@ export function AgentTranscriptDialog({
                           copyTitle={t(($) => $.transcript.copy_branch)}
                         />
                       )}
+                      {cleanupWarning && (
+                        <RunDetailRow
+                          label={t(($) => $.transcript.details_cleanup_warning)}
+                          value={cleanupWarning}
+                          mono
+                        />
+                      )}
                       {/* The localized reason, from the stable
                           `failure_reason` enum — this is the explanation, and
                           it reads in the user's language. */}
@@ -1084,6 +1106,13 @@ export function AgentTranscriptDialog({
             </div>
           </div>
         </div>
+
+        {showCleanupWarning && (
+          <div className="flex items-start gap-2 border-b border-warning/30 bg-warning/5 px-4 py-2 text-caption text-warning">
+            <TriangleAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{t(($) => $.transcript.cleanup_warning_body)}</span>
+          </div>
+        )}
 
         {/* ── What was asked ─────────────────────────────────────────── */}
         <RunTriggerRow task={task} />

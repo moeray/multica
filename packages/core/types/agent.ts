@@ -339,6 +339,17 @@ export interface AgentTask {
   cancelled_by_comment_change?: boolean;
   /** Present on cancellations recorded by a backend with actor provenance. */
   cancelled_by?: TaskCancellationActor;
+  /**
+   * Set when a completed run delivered its work but the disposable task
+   * worktree could not be fully removed. This is a warning, not a failure.
+   */
+  cleanup_warning?: string;
+  /**
+   * Server-computed completion outcome. `completed_with_cleanup_warning`
+   * means the run delivered successfully but left worktree cleanup residue.
+   * Open string on the wire so an older client degrades to the plain status.
+   */
+  completion_outcome?: "completed" | "completed_with_cleanup_warning" | (string & {});
   created_at: string;
   /** Non-empty when the task was spawned from a chat session. */
   chat_session_id?: string;

@@ -879,6 +879,9 @@
     "details_cost": "Cost",
     "usage_chip_title": "Tokens and estimated cost for this run",
     "details_branch": "Branch",
+    "cleanup_warning_chip": "Delivered; cleanup failed",
+    "cleanup_warning_body": "The branch and commit were delivered. The temporary worktree could not be fully removed; the remaining files can be deleted manually.",
+    "details_cleanup_warning": "Cleanup warning",
     "details_reason": "Reason",
     "details_diagnostics": "Technical details",
     "copy_branch": "Copy branch name",
@@ -919,6 +922,7 @@
   "task_failure": {
     "cancelled_by_system": "Cancelled by the system",
     "cancelled_by_actor": "Cancelled by {{name}}",
+    "cleanup_warning": "Delivered; worktree cleanup failed",
     "reasons": {
       "queued_expired": "Expired in queue",
       "runtime_offline": "Daemon offline",

@@ -864,6 +864,9 @@
     "details_cost": "费用",
     "usage_chip_title": "这次运行消耗的 token 与估算费用",
     "details_branch": "分支",
+    "cleanup_warning_chip": "已交付，但清理失败",
+    "cleanup_warning_body": "分支和提交已交付。临时工作树未能完全删除，剩余文件可手动清理。",
+    "details_cleanup_warning": "清理警告",
     "details_reason": "原因",
     "details_diagnostics": "原始诊断",
     "copy_branch": "复制分支名",
@@ -898,6 +901,7 @@
     "trigger_wakeup": "唤醒触发"
   },
   "task_failure": {
+    "cleanup_warning": "已交付，但工作树清理失败",
     "cancelled_by_system": "已由系统取消",
     "cancelled_by_actor": "已由 {{name}} 取消",
     "reasons": {

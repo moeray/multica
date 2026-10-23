@@ -2062,6 +2062,8 @@ export const AgentTaskSchema = z.object({
   durable_work_dir: z.string().optional().catch(undefined),
   relative_durable_work_dir: z.string().optional().catch(undefined),
   branch_name: z.string().optional().catch(undefined),
+  cleanup_warning: z.string().optional().catch(undefined),
+  completion_outcome: z.string().optional().catch(undefined),
   attribution: TaskAttributionSchema.optional(),
   // Per-run token usage. Same independent-degradation rule as the coverage
   // arrays above: usage is additive display metadata, so one malformed entry

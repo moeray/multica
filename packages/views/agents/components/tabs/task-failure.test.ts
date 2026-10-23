@@ -13,8 +13,10 @@ import {
   FAILURE_REASON_I18N_KEYS,
   cancellationActorLabel,
   cancelReasonLabel,
+  cleanupWarningLabel,
   failureNeedsAction,
   failureReasonLabel,
+  hasCleanupWarning,
   isCancelledOutcome,
   runOutcomeLabel,
 } from "./task-failure";
@@ -247,5 +249,26 @@ describe("run outcome", () => {
       status: "cancelled", cancelled_by: { type: "member", name: "Jiayuan" },
     }, enT)).toBe("Cancelled by Jiayuan");
     expect(runOutcomeLabel({ status: "cancelled" }, enT)).toBeNull();
+  });
+
+  it("labels a delivered run whose worktree cleanup failed", () => {
+    expect(hasCleanupWarning({
+      status: "completed",
+      cleanup_warning: "Access is denied",
+    })).toBe(true);
+    expect(hasCleanupWarning({ status: "completed" })).toBe(false);
+    expect(hasCleanupWarning({
+      status: "completed",
+      completion_outcome: "completed_with_cleanup_warning",
+    })).toBe(true);
+    expect(hasCleanupWarning({
+      status: "failed",
+      cleanup_warning: "Access is denied",
+    })).toBe(false);
+    expect(runOutcomeLabel({
+      status: "completed",
+      cleanup_warning: "Access is denied",
+    }, enT)).toBe(cleanupWarningLabel(enT));
+    expect(cleanupWarningLabel(enT)).toBe("Delivered; worktree cleanup failed");
   });
 });

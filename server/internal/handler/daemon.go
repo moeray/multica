@@ -4297,7 +4297,8 @@ type TaskCompleteRequest struct {
 	SessionID string `json:"session_id"` // Claude session ID for future resumption
 	WorkDir   string `json:"work_dir"`   // working directory used during execution
 	// DurableWorkDir is the configured project directory that replaces a
-	// disposable task worktree after the daemon confirms the worktree is gone.
+	// disposable task worktree once the daemon has delivered the run. Cleanup
+	// residue may remain, but the branch and commit are already durable.
 	DurableWorkDir string `json:"durable_work_dir,omitempty"`
 	// BranchName is the branch this run delivered its work on. Worktree-mode
 	// local_directory tasks never touch the user's working copy, so this is the
@@ -4312,6 +4313,10 @@ type TaskCompleteRequest struct {
 	// to report" — this says "never hand this id to a later run". Older
 	// daemons omit it, which is exactly the pre-fix behaviour.
 	RetiredSessionID string `json:"retired_session_id,omitempty"`
+	// CleanupWarning is set when the run delivered its work but the
+	// disposable task worktree could not be fully removed. It is a warning,
+	// not a failure: the task still completes.
+	CleanupWarning string `json:"cleanup_warning,omitempty"`
 }
 
 // sanitizeTaskCompleteRequest / sanitizeTaskFailRequest scrub every
@@ -4329,6 +4334,7 @@ func sanitizeTaskCompleteRequest(req *TaskCompleteRequest) {
 	req.DurableWorkDir = util.SanitizeTextForPostgres(req.DurableWorkDir)
 	req.BranchName = util.SanitizeTextForPostgres(req.BranchName)
 	req.RetiredSessionID = util.SanitizeTextForPostgres(req.RetiredSessionID)
+	req.CleanupWarning = util.SanitizeTextForPostgres(req.CleanupWarning)
 }
 
 func sanitizeTaskFailRequest(req *TaskFailRequest) {
@@ -4419,6 +4425,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.emitIssueExecutedOnFirstCompletion(r, task)
+	h.TaskService.RecordWorktreeCleanupWarning(r.Context(), *task, req.CleanupWarning)
 
 	// MUL-4195: guarantee at-least-once processing. If a member posted a
 	// deliberate comment while this run was executing (or one was merged into

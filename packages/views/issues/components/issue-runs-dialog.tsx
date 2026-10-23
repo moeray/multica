@@ -15,7 +15,13 @@ import { useActorName } from "@multica/core/workspace/hooks";
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { TranscriptButton } from "../../common/task-transcript";
-import { cancellationActorLabel, cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
+import {
+  cancellationActorLabel,
+  cancelReasonLabel,
+  cleanupWarningLabel,
+  failureReasonLabel,
+  hasCleanupWarning,
+} from "../../agents/components/tabs/task-failure";
 import { Segmented } from "../../dashboard/components/dashboard-shared";
 import { formatDuration } from "../../dashboard/utils";
 import { useLocale, useT } from "../../i18n";
@@ -812,7 +818,8 @@ function useStatusReason(task: AgentTask): string | null {
       ? failureReasonLabel(task.failure_reason, tAgents)
       : cancelReasonLabel(task, tAgents);
   const cancelledBy = cancellationActorLabel(task, tAgents);
-  return [cancelledBy, reason].filter(Boolean).join(" · ") || null;
+  const cleanup = hasCleanupWarning(task) ? cleanupWarningLabel(tAgents) : null;
+  return [cleanup, cancelledBy, reason].filter(Boolean).join(" · ") || null;
 }
 
 function RunListRow({ run, issueId }: { run: TimelineRun; issueId: string }) {

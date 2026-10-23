@@ -36,7 +36,13 @@ import { AppLink } from "../../../navigation";
 import { TranscriptButton } from "../../../common/task-transcript";
 import { AttributionBadge } from "../../../issues/components/attribution-badge";
 import { taskStatusConfig } from "../../config";
-import { cancellationActorLabel, cancelReasonLabel, failureReasonLabel } from "./task-failure";
+import {
+  cancellationActorLabel,
+  cancelReasonLabel,
+  cleanupWarningLabel,
+  failureReasonLabel,
+  hasCleanupWarning,
+} from "./task-failure";
 import { Sparkline } from "../sparkline";
 import { useT, useTimeAgo } from "../../../i18n";
 
@@ -643,6 +649,7 @@ function TaskRow({
     task.status === "failed"
       ? failureReasonLabel(task.failure_reason, t)
       : cancelReasonLabel(task, t);
+  const cleanupLabel = hasCleanupWarning(task) ? cleanupWarningLabel(t) : null;
   const statusLabel = cancellationActorLabel(task, t) ?? taskStatusLabel(task.status, t);
 
   // Only show duration for terminal rows. An active row's duration is
@@ -727,6 +734,12 @@ function TaskRow({
             <>
               <Sep />
               <span>{durationText}</span>
+            </>
+          )}
+          {cleanupLabel && (
+            <>
+              <Sep />
+              <span className="text-warning">{cleanupLabel}</span>
             </>
           )}
           {failureLabel && (

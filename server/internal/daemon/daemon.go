@@ -273,6 +273,10 @@ type terminalTaskReport struct {
 	// run on the issue or chat can select it again, however many clean rows
 	// still reference it.
 	retiredSessionID string
+	// cleanupWarning is set when a completed run delivered its work but the
+	// disposable worktree could not be fully removed. It is carried on the
+	// completion callback and must never turn the run into a failure.
+	cleanupWarning string
 }
 
 type terminalReportSendFunc func(context.Context, terminalTaskReport, []time.Duration) error
@@ -6201,6 +6205,7 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			durableWorkDir:        result.DurableWorkDir,
 			sessionRolloutMissing: result.SessionRolloutMissing,
 			retiredSessionID:      result.RetiredSessionID,
+			cleanupWarning:        result.CleanupWarning,
 		})
 		if err == nil {
 			return
@@ -6344,7 +6349,7 @@ func (d *Daemon) sendTerminalTaskReport(ctx context.Context, report terminalTask
 	}
 	switch report.kind {
 	case terminalTaskReportComplete:
-		return d.client.completeTaskWithRetrySchedule(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir, schedule)
+		return d.client.completeTaskWithRetrySchedule(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir, report.cleanupWarning, schedule)
 	case terminalTaskReportFail:
 		return d.client.failTaskWithRetrySchedule(ctx, report.taskID, report.errorMessage, report.sessionID, report.workDir, report.branchName, report.failureReason, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir, schedule)
 	default:
@@ -8238,17 +8243,22 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 			if finalizeErr == nil {
 				// The configured local_directory becomes authoritative only after
-				// Finalize confirms the disposable task worktree is actually gone.
+				// Finalize confirms the run delivered. A cleanup warning means the
+				// disposable worktree could not be fully removed, but the branch
+				// and its delivery point are already durable, so the configured
+				// directory is still the authoritative location for later runs.
 				if localAssignment != nil {
 					taskResult.DurableWorkDir = localAssignment.AbsPath
 				}
+				taskResult.CleanupWarning = outcome.CleanupWarning
 				return
 			}
 			// Finalize could not complete its delivery contract, so the task
-			// worktree remains authoritative. This covers both an uncommitted
-			// change set and a committed branch whose worktree removal could not
-			// be confirmed. Fail the task: reporting success or a durable project
-			// directory here would hide the path that still needs attention.
+			// worktree remains authoritative. This covers an uncommitted change
+			// set, an unrecorded delivery point, or a failed abort check. Fail the
+			// task: reporting success or a durable project directory here would
+			// hide the path that still needs attention. A removal-only failure is
+			// NOT this path; Finalize reports it as CleanupWarning instead.
 			//
 			// Wrapped in worktreePreservedError so the cancel path can
 			// recognise it: a cancelled task discards its result and error, but

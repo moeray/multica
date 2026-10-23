@@ -618,11 +618,11 @@ func (c *Client) ReportTaskMessages(ctx context.Context, taskID string, messages
 	}, nil)
 }
 
-func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {
-	return c.completeTaskWithRetrySchedule(ctx, taskID, output, branchName, sessionID, workDir, sessionRolloutMissing, retiredSessionID, durableWorkDir, defaultTerminalRetrySchedule)
+func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir, cleanupWarning string) error {
+	return c.completeTaskWithRetrySchedule(ctx, taskID, output, branchName, sessionID, workDir, sessionRolloutMissing, retiredSessionID, durableWorkDir, cleanupWarning, defaultTerminalRetrySchedule)
 }
 
-func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
+func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir, cleanupWarning string, schedule []time.Duration) error {
 	body := map[string]any{"output": output}
 	if branchName != "" {
 		body["branch_name"] = branchName
@@ -641,6 +641,9 @@ func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, outp
 	}
 	if retiredSessionID != "" {
 		body["retired_session_id"] = retiredSessionID
+	}
+	if cleanupWarning != "" {
+		body["cleanup_warning"] = cleanupWarning
 	}
 	return c.postJSONWithRetry(ctx, fmt.Sprintf("/api/daemon/tasks/%s/complete", taskID), body, nil, schedule)
 }
