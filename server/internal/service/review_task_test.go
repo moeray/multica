@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -265,6 +266,38 @@ func TestCreateRetryTaskPreservesReviewKey(t *testing.T) {
 	}
 	if retry.DedupeKey != first.Task.DedupeKey {
 		t.Fatalf("retry dedupe_key = %v, want %v", retry.DedupeKey, first.Task.DedupeKey)
+	}
+}
+
+type failingTxStarter struct{ err error }
+
+func (f failingTxStarter) Begin(context.Context) (pgx.Tx, error) { return nil, f.err }
+
+// TestRerunReviewFailsClosedWhenSupersedeFails proves a manual re-review does
+// not enqueue under a new key when the old generation could not be retired.
+func TestRerunReviewFailsClosedWhenSupersedeFails(t *testing.T) {
+	fx := newReviewRoundFixture(t)
+	ctx := context.Background()
+	first, err := fx.f.svc.TaskSvc.RequestReview(ctx, fx.issue, fx.reviewerA, fx.mentionCreator(t))
+	if err != nil {
+		t.Fatalf("first review: %v", err)
+	}
+	broken := &TaskService{
+		Queries:   fx.f.q,
+		TxStarter: failingTxStarter{err: errors.New("injected supersede failure")},
+	}
+	_, err = broken.RerunIssue(ctx, fx.issue.ID, first.Task.ID, pgtype.UUID{}, parseTestUUID(t, fx.f.UserID), nil)
+	if err == nil {
+		t.Fatal("RerunIssue succeeded despite a failed supersede")
+	}
+	var taskCount int
+	if err := fx.f.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2
+	`, fx.issue.ID, fx.reviewerA).Scan(&taskCount); err != nil {
+		t.Fatalf("count review tasks: %v", err)
+	}
+	if taskCount != 1 {
+		t.Fatalf("review tasks after failed supersede = %d, want the original 1", taskCount)
 	}
 }
 

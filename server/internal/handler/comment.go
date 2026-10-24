@@ -2228,6 +2228,10 @@ func (h *Handler) resolveReviewCommentEnqueue(ctx context.Context, issue db.Issu
 			"issue_id", uuidToString(issue.ID),
 			"agent_id", uuidToString(trigger.Agent.ID),
 			"error", err)
+		// A new generation uses a new key, so the unique index cannot protect
+		// us from an old queued/running task that was not retired. Fail closed:
+		// do not enqueue a second active review while the old one may still run.
+		return DispatchBlocked, ReasonInternalError
 	}
 	result, err := h.TaskService.RequestReview(ctx, issue, trigger.Agent.ID, func(ctx context.Context, key string) (db.AgentTaskQueue, error) {
 		return h.TaskService.EnqueueMentionTaskForReview(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed, key)

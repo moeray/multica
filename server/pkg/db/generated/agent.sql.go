@@ -7246,17 +7246,26 @@ SET coalesced_comment_ids = (
     runtime_connected_apps = $11
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
-    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = $12
-      AND t.agent_id = $13
+    -- Review tasks created by a wakeup are valid merge targets; ordinary
+    -- wakeup runs still stay outside comment coalescing.
+    WHERE (
+          t.context->>'wakeup_id' IS NULL
+          OR (
+              $12::text IS NOT NULL
+              AND t.dedupe_key = $12::text
+          )
+      )
+      AND t.issue_id = $13
+      AND t.agent_id = $14
       -- A review task covers the whole issue/round, so its comment is folded
       -- regardless of thread. Ordinary mention tasks stay thread-scoped.
       AND (
           (
-              $14::text IS NOT NULL
-              AND t.dedupe_key = $14::text
+              $12::text IS NOT NULL
+              AND t.dedupe_key = $12::text
           )
           OR (
-              $14::text IS NULL
+              $12::text IS NULL
               AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id($1::uuid)
           )
       )
@@ -7270,7 +7279,7 @@ WHERE id = (
       -- into it would give a new-HEAD comment old-HEAD review coverage. Empty/
       -- absent head_sha (no linked PR) matches any task, preserving coalescing.
       AND (
-          $14::text IS NOT NULL
+          $12::text IS NOT NULL
           OR COALESCE($15::text, '') = ''
           OR t.context->>'head_sha' = $15::text
       )
@@ -7292,9 +7301,9 @@ type MergeCommentIntoPendingTaskParams struct {
 	NewTriggerEvidenceRefID pgtype.UUID `json:"new_trigger_evidence_ref_id"`
 	NewRuntimeMcpOverlay    []byte      `json:"new_runtime_mcp_overlay"`
 	NewRuntimeConnectedApps []byte      `json:"new_runtime_connected_apps"`
+	ReviewDedupeKey         pgtype.Text `json:"review_dedupe_key"`
 	IssueID                 pgtype.UUID `json:"issue_id"`
 	AgentID                 pgtype.UUID `json:"agent_id"`
-	ReviewDedupeKey         pgtype.Text `json:"review_dedupe_key"`
 	HeadSha                 pgtype.Text `json:"head_sha"`
 }
 
@@ -7358,9 +7367,9 @@ func (q *Queries) MergeCommentIntoPendingTask(ctx context.Context, arg MergeComm
 		arg.NewTriggerEvidenceRefID,
 		arg.NewRuntimeMcpOverlay,
 		arg.NewRuntimeConnectedApps,
+		arg.ReviewDedupeKey,
 		arg.IssueID,
 		arg.AgentID,
-		arg.ReviewDedupeKey,
 		arg.HeadSha,
 	)
 	var i MergeCommentIntoPendingTaskRow
@@ -8385,21 +8394,28 @@ SET coalesced_comment_ids = (
     )
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
-    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = $2
-      AND t.agent_id = $3
+    WHERE (
+          t.context->>'wakeup_id' IS NULL
+          OR (
+              $2::text IS NOT NULL
+              AND t.dedupe_key = $2::text
+          )
+      )
+      AND t.issue_id = $3
+      AND t.agent_id = $4
       AND (
           (
-              $4::text IS NOT NULL
-              AND t.dedupe_key = $4::text
+              $2::text IS NOT NULL
+              AND t.dedupe_key = $2::text
           )
           OR (
-              $4::text IS NULL
+              $2::text IS NULL
               AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id($1::uuid)
           )
       )
       AND t.status IN ('dispatched', 'running', 'waiting_local_directory')
       AND (
-          $4::text IS NOT NULL
+          $2::text IS NOT NULL
           OR COALESCE($5::text, '') = ''
           OR t.context->>'head_sha' = $5::text
       )
@@ -8412,9 +8428,9 @@ RETURNING id, coalesced_comment_ids
 
 type RegisterPlannedCommentForActiveTaskParams struct {
 	CommentID       pgtype.UUID `json:"comment_id"`
+	ReviewDedupeKey pgtype.Text `json:"review_dedupe_key"`
 	IssueID         pgtype.UUID `json:"issue_id"`
 	AgentID         pgtype.UUID `json:"agent_id"`
-	ReviewDedupeKey pgtype.Text `json:"review_dedupe_key"`
 	HeadSha         pgtype.Text `json:"head_sha"`
 }
 
@@ -8452,9 +8468,9 @@ type RegisterPlannedCommentForActiveTaskRow struct {
 func (q *Queries) RegisterPlannedCommentForActiveTask(ctx context.Context, arg RegisterPlannedCommentForActiveTaskParams) (RegisterPlannedCommentForActiveTaskRow, error) {
 	row := q.db.QueryRow(ctx, registerPlannedCommentForActiveTask,
 		arg.CommentID,
+		arg.ReviewDedupeKey,
 		arg.IssueID,
 		arg.AgentID,
-		arg.ReviewDedupeKey,
 		arg.HeadSha,
 	)
 	var i RegisterPlannedCommentForActiveTaskRow

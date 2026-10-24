@@ -1809,7 +1809,16 @@ SET coalesced_comment_ids = (
     runtime_connected_apps = sqlc.narg('new_runtime_connected_apps')
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
-    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+    -- Review tasks created by a wakeup are valid merge targets; ordinary
+    -- wakeup runs still stay outside comment coalescing.
+    WHERE (
+          t.context->>'wakeup_id' IS NULL
+          OR (
+              sqlc.narg('review_dedupe_key')::text IS NOT NULL
+              AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+          )
+      )
+      AND t.issue_id = @issue_id
       AND t.agent_id = @agent_id
       -- A review task covers the whole issue/round, so its comment is folded
       -- regardless of thread. Ordinary mention tasks stay thread-scoped.
@@ -1877,7 +1886,14 @@ SET coalesced_comment_ids = (
     )
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
-    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+    WHERE (
+          t.context->>'wakeup_id' IS NULL
+          OR (
+              sqlc.narg('review_dedupe_key')::text IS NOT NULL
+              AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+          )
+      )
+      AND t.issue_id = @issue_id
       AND t.agent_id = @agent_id
       AND (
           (

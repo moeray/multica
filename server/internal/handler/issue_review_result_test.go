@@ -91,6 +91,22 @@ func TestDispatchReviewResultRejectsNonReviewerAgent(t *testing.T) {
 		t.Fatalf("review_result rows written by a stale run = %d, want 0", count)
 	}
 
+	// Migration backfill retires an older running duplicate by clearing its
+	// dedupe key and marking the context. The marker must suppress its verdict
+	// even though there is no key left to classify the run as a review task.
+	supersededRun := &db.AgentTaskQueue{
+		Context: []byte(`{"review_superseded":true}`),
+	}
+	got = h.dispatchReviewResult(ctx, prevIssue, issue, "agent", reviewerID, supersededRun)
+	if got.Delivered || got.SuppressStatusNotification {
+		t.Fatalf("superseded review dispatch = %+v, want no delivery", got)
+	}
+	if count := dbfx.Count(t, `
+		SELECT count(*) FROM chat_message
+		WHERE chat_session_id = $1 AND message_kind = 'review_result'`, sessionID); count != 0 {
+		t.Fatalf("review_result rows written by a keyless superseded run = %d, want 0", count)
+	}
+
 	h.dispatchReviewResult(ctx, prevIssue, issue, "agent", reviewerID, nil)
 	if count := dbfx.Count(t, `
 		SELECT count(*) FROM chat_message

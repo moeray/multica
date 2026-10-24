@@ -5825,11 +5825,10 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 	// round is already active returns that run instead of queueing a sibling.
 	if reviewKey, ok := ReviewTaskKey(issue, agentID); ok && (sourceIsReviewTask || !sourceTaskID.Valid) {
 		if err := s.SupersedeStaleReviewTasks(ctx, issue.ID, agentID, reviewKey); err != nil {
-			slog.Warn("review rerun: supersede stale review tasks failed",
-				"issue_id", util.UUIDToString(issue.ID),
-				"agent_id", util.UUIDToString(agentID),
-				"error", err,
-			)
+			// The new key cannot be protected by the unique index against an
+			// old generation that was not retired, so refuse the rerun rather
+			// than risk two active review tasks.
+			return nil, fmt.Errorf("supersede stale review tasks: %w", err)
 		}
 		result, err := s.RequestReview(ctx, issue, agentID, func(ctx context.Context, key string) (db.AgentTaskQueue, error) {
 			return s.enqueueRerunTaskWithDedupe(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, key)

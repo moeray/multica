@@ -105,6 +105,11 @@ type ReviewTaskCreator func(ctx context.Context, key string) (db.AgentTaskQueue,
 // returns the existing live task instead of creating a second one when the same
 // reviewer already has an active task for the round. A terminal task no longer
 // holds the partial unique key, so a failed review can be retried.
+//
+// Callers must retire an older generation with SupersedeStaleReviewTasks (or
+// the transaction-scoped variant) immediately before this call and must not
+// create the new task if that retirement fails: the partial index only covers
+// one key, so an unretired older generation could otherwise coexist with it.
 func (s *TaskService) RequestReview(ctx context.Context, issue db.Issue, agentID pgtype.UUID, create ReviewTaskCreator) (ReviewTaskResult, error) {
 	return s.requestReviewWithQueries(ctx, s.Queries, issue, agentID, create)
 }

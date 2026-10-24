@@ -97,19 +97,20 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 		t.Fatalf("generation after second handoff = %d (err %v), want 2", generation, err)
 	}
 
-	// Two active rows for the same reviewer/round, as the old mention + wakeup
-	// paths produced.
+	// Three active rows for the same reviewer/round, as the old mention +
+	// wakeup paths could produce: two already running and one still queued.
 	if _, err := conn.Exec(ctx, `
-		INSERT INTO agent_task_queue (agent_id, issue_id, status, workflow_step, trigger_evidence_kind)
-		VALUES ($1, $2, 'queued', 'in_review', 'issue_wakeup'),
-		       ($1, $2, 'queued', 'in_review', 'issue_wakeup')
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, created_at, workflow_step, trigger_evidence_kind)
+		VALUES ($1, $2, 'running', now() - interval '3 minutes', 'in_review', 'issue_wakeup'),
+		       ($1, $2, 'running', now() - interval '2 minutes', 'in_review', 'issue_wakeup'),
+		       ($1, $2, 'queued',  now() - interval '1 minute', 'in_review', 'issue_wakeup')
 	`, agentID, issueID); err != nil {
 		t.Fatalf("seed duplicate review tasks: %v", err)
 	}
 
 	applyMigrationFile(t, ctx, conn.Conn(), "600_review_task_dedupe_backfill.up.sql")
 	const expectedKey = "review:" + issueID + ":" + agentID + ":2"
-	var keyed, cancelled int
+	var keyed, cancelled, marked int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM agent_task_queue WHERE dedupe_key = $1`, expectedKey).Scan(&keyed); err != nil {
 		t.Fatalf("count keyed tasks: %v", err)
 	}
@@ -119,8 +120,15 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 	`).Scan(&cancelled); err != nil {
 		t.Fatalf("count cancelled duplicates: %v", err)
 	}
-	if keyed != 1 || cancelled != 1 {
-		t.Fatalf("backfill keyed=%d cancelled=%d, want 1/1", keyed, cancelled)
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE status = 'running' AND dedupe_key IS NULL
+		  AND context->>'review_superseded' = 'true'
+	`).Scan(&marked); err != nil {
+		t.Fatalf("count superseded running duplicates: %v", err)
+	}
+	if keyed != 1 || cancelled != 1 || marked != 1 {
+		t.Fatalf("backfill keyed=%d cancelled=%d marked=%d, want 1/1/1", keyed, cancelled, marked)
 	}
 
 	applyMigrationFile(t, ctx, conn.Conn(), "601_agent_task_review_dedupe_key_index.up.sql")

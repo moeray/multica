@@ -40,7 +40,10 @@ func (h *Handler) dispatchReviewResult(
 	// enters a newer review round, an older run may still finish (or a
 	// superseded run may still move the status), but its verdict must not be
 	// published as if it reviewed the newer handoff.
-	if callerRun != nil && service.IsReviewTask(*callerRun) {
+	if callerRun != nil {
+		// The superseded marker is written by the migration backfill on rows
+		// that lost their dedupe key, so it must be checked without requiring
+		// IsReviewTask. Otherwise an old running duplicate can still publish.
 		if service.ReviewTaskSuperseded(*callerRun) {
 			slog.Info("review result suppressed: run was superseded by a newer round",
 				"issue_id", uuidToString(issue.ID),
