@@ -2102,6 +2102,9 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 // genuine non-convergence it returns a truthful internal_error, never a fabricated
 // deferred that would silently drop the comment.
 func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID) (DispatchStatus, DispatchReasonCode) {
+	if reviewKey, ok := service.ReviewTaskKey(issue, trigger.Agent.ID); ok {
+		return h.resolveReviewCommentEnqueue(ctx, issue, trigger, triggerCommentID, reviewKey)
+	}
 	pending := trigger.AlreadyPending
 	lostRace := false
 	// Resolve the reviewed HEAD lazily and at most once — the common
@@ -2212,6 +2215,87 @@ func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Iss
 	slog.Warn("comment trigger enqueue did not converge; reporting non-success",
 		"issue_id", uuidToString(issue.ID), "agent_id", uuidToString(trigger.Agent.ID))
 	return DispatchBlocked, ReasonInternalError
+}
+
+// resolveReviewCommentEnqueue is the review-request branch of a comment
+// trigger. Every source that asks the same reviewer to look at the same round
+// contends on one dedupe key, so a wakeup run and this mention cannot both
+// start. When a live task already exists the comment is folded into it (queued)
+// or registered as a planned follow-up (already claimed), never dropped.
+func (h *Handler) resolveReviewCommentEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID, reviewKey string) (DispatchStatus, DispatchReasonCode) {
+	if err := h.TaskService.SupersedeStaleReviewTasks(ctx, issue.ID, trigger.Agent.ID, reviewKey); err != nil {
+		slog.Warn("review comment enqueue: supersede stale review tasks failed",
+			"issue_id", uuidToString(issue.ID),
+			"agent_id", uuidToString(trigger.Agent.ID),
+			"error", err)
+		// A new generation uses a new key, so the unique index cannot protect
+		// us from an old queued/running task that was not retired. Fail closed:
+		// do not enqueue a second active review while the old one may still run.
+		return DispatchBlocked, ReasonInternalError
+	}
+	result, err := h.TaskService.RequestReview(ctx, issue, trigger.Agent.ID, func(ctx context.Context, key string) (db.AgentTaskQueue, error) {
+		return h.TaskService.EnqueueMentionTaskForReview(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed, key)
+	})
+	if err != nil {
+		if errors.Is(err, service.ErrDuplicatePendingTask) || errors.Is(err, service.ErrNotReviewRequest) {
+			// Another pending run for this reviewer covers the issue; the
+			// authoritative review task could not take the pending slot. This
+			// request is still handled by that run, not lost.
+			return DispatchDeferred, ReasonAlreadyActive
+		}
+		slog.Warn("review comment enqueue failed",
+			"issue_id", uuidToString(issue.ID),
+			"agent_id", uuidToString(trigger.Agent.ID),
+			"error", err)
+		return DispatchBlocked, commentEnqueueFailureReason(err)
+	}
+	if !result.Existing {
+		return DispatchQueued, ReasonQueued
+	}
+
+	// A review task covers the whole issue/round, so the head-scoped merge is
+	// intentionally bypassed: the dedupe key is the round identity.
+	if result.Task.Status == "queued" || result.Task.Status == "deferred" {
+		switch h.mergeCommentIntoPendingTaskForReview(ctx, issue, trigger, triggerCommentID, pgtype.Text{}, reviewKey) {
+		case commentMergeSucceeded:
+			return DispatchCoalesced, ReasonCoalesced
+		case commentMergeAttributionBlocked:
+			return DispatchBlocked, ReasonAttributionBlocked
+		case commentMergeNoPendingTask:
+			// The retry may have been promoted and claimed between the lookup
+			// and the merge. Re-read before choosing the active-task path so
+			// the comment is still registered as planned input.
+			refreshed, refreshErr := h.Queries.GetAgentTask(ctx, result.Task.ID)
+			if refreshErr != nil {
+				slog.Warn("review comment: refresh task after merge miss failed",
+					"issue_id", uuidToString(issue.ID),
+					"agent_id", uuidToString(trigger.Agent.ID),
+					"task_id", uuidToString(result.Task.ID),
+					"error", refreshErr)
+				return DispatchBlocked, ReasonInternalError
+			}
+			result.Task = refreshed
+		case commentMergeError:
+			return DispatchBlocked, ReasonInternalError
+		}
+	}
+	if result.Task.Status == "dispatched" || result.Task.Status == "running" || result.Task.Status == "waiting_local_directory" {
+		registered, registerErr := h.registerPlannedCommentForActiveTaskForReview(ctx, issue, trigger.Agent.ID, triggerCommentID, pgtype.Text{}, reviewKey)
+		if registerErr != nil {
+			slog.Warn("review comment: register planned follow-up failed",
+				"issue_id", uuidToString(issue.ID),
+				"agent_id", uuidToString(trigger.Agent.ID),
+				"error", registerErr)
+			return DispatchBlocked, ReasonInternalError
+		}
+		if registered {
+			return DispatchDeferred, ReasonDeferred
+		}
+	}
+	// The run is already active (or just changed state under us). Its
+	// completion reconciliation covers this comment, and the response says so
+	// instead of pretending a second run will start.
+	return DispatchDeferred, ReasonAlreadyActive
 }
 
 // commentTriggerOutcomes maps each explicit mention target to its final outcome
@@ -2386,6 +2470,10 @@ func commentMergeTerminalOutcome(result commentMergeResult) (status DispatchStat
 // member created, the coalescing run carrying the latest instruction's
 // originator and matching connected-app overlay.
 func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text) commentMergeResult {
+	return h.mergeCommentIntoPendingTaskForReview(ctx, issue, trigger, newTriggerCommentID, headSha, "")
+}
+
+func (h *Handler) mergeCommentIntoPendingTaskForReview(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text, reviewKey string) commentMergeResult {
 	// Re-attribute the coalescing run to the new comment's human atomically: the
 	// whole attribution snapshot moves, not just the person columns (MUL-4302). An
 	// issue-assignee reaction is comment_source; a mention / thread-parent /
@@ -2423,6 +2511,7 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		NewTriggerSummary:       h.TaskService.BuildCommentTriggerSummary(ctx, issue.WorkspaceID, newTriggerCommentID),
 		NewRuntimeMcpOverlay:    overlay,
 		NewRuntimeConnectedApps: connectedApps,
+		ReviewDedupeKey:         pgtype.Text{String: reviewKey, Valid: reviewKey != ""},
 		HeadSha:                 headSha,
 	})
 	if err != nil {
@@ -2459,11 +2548,16 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 // decision. Delivered ids are untouched, so completion reconcile replays the
 // comment as a single bounded follow-up (#5914). See the query doc.
 func (h *Handler) registerPlannedCommentForActiveTask(ctx context.Context, issue db.Issue, agentID, commentID pgtype.UUID, headSha pgtype.Text) (bool, error) {
+	return h.registerPlannedCommentForActiveTaskForReview(ctx, issue, agentID, commentID, headSha, "")
+}
+
+func (h *Handler) registerPlannedCommentForActiveTaskForReview(ctx context.Context, issue db.Issue, agentID, commentID pgtype.UUID, headSha pgtype.Text, reviewKey string) (bool, error) {
 	row, err := h.Queries.RegisterPlannedCommentForActiveTask(ctx, db.RegisterPlannedCommentForActiveTaskParams{
-		CommentID: commentID,
-		IssueID:   issue.ID,
-		AgentID:   agentID,
-		HeadSha:   headSha,
+		CommentID:       commentID,
+		IssueID:         issue.ID,
+		AgentID:         agentID,
+		ReviewDedupeKey: pgtype.Text{String: reviewKey, Valid: reviewKey != ""},
+		HeadSha:         headSha,
 	})
 	if err != nil {
 		if isNotFound(err) {

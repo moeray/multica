@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_agent_task_queue_review_dedupe_key_v2;

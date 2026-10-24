@@ -179,6 +179,7 @@ type AgentTaskQueue struct {
 	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
 	IssueSnapshot             []byte      `json:"issue_snapshot"`
 	WorkflowStep              pgtype.Text `json:"workflow_step"`
+	DedupeKey                 pgtype.Text `json:"dedupe_key"`
 }
 
 type AgentToLabel struct {
@@ -889,6 +890,7 @@ type Issue struct {
 	LastActivityAt     pgtype.Timestamptz `json:"last_activity_at"`
 	TriageState        pgtype.Text        `json:"triage_state"`
 	DuplicateOfIssueID pgtype.UUID        `json:"duplicate_of_issue_id"`
+	ReviewGeneration   int64              `json:"review_generation"`
 }
 
 type IssueChildEvent struct {

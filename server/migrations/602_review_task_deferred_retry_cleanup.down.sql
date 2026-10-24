@@ -1,0 +1,2 @@
+-- Data repair only. Cancelled duplicates stay cancelled; the unique index
+-- replacement is rolled back by its own migrations.

@@ -140,6 +140,8 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"603_agent_task_review_dedupe_key_index_v2":                 "idx_agent_task_queue_review_dedupe_key_v2",
+	"601_agent_task_review_dedupe_key_index":                    "idx_agent_task_queue_review_dedupe_key",
 	"598_chat_message_dedupe_key_index":                         "idx_chat_message_dedupe_key",
 	"594_inbox_item_dedupe_key_index":                           "idx_inbox_item_dedupe_key",
 	"591_inbox_lark_delivery_target_index":                      "idx_inbox_lark_delivery_target",
@@ -374,6 +376,7 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"604_drop_agent_task_review_dedupe_key_v1":              "idx_agent_task_queue_review_dedupe_key",
 	"598_chat_message_dedupe_key_index":                     "idx_chat_message_dedupe_key",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",

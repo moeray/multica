@@ -320,7 +320,7 @@ INSERT INTO agent_task_queue (
     coalesced_comment_ids, trigger_summary, force_fresh_session, is_leader_task, handoff_note,
     squad_id, context, originator_user_id, accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
     originator_source, delegated_from_task_id, rule_version_id, rerun_of_task_id, trigger_evidence_kind, trigger_evidence_ref_id,
-    workflow_step, id
+    workflow_step, dedupe_key, id
 )
 SELECT
     $1, $2, $3, 'queued', $4, sqlc.narg(trigger_comment_id),
@@ -347,6 +347,7 @@ SELECT
     sqlc.narg(trigger_evidence_ref_id),
     -- The issue's status as this task is queued: the workflow step it works on (MUL-7420).
     (SELECT i.status FROM issue i WHERE i.id = $3),
+    sqlc.narg('dedupe_key'),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 WHERE lock_task_owner_rows($1, $3, $2)
 RETURNING *;
@@ -488,7 +489,7 @@ INSERT INTO agent_task_queue (
     originator_source, delegated_from_task_id, rule_version_id,
     trigger_evidence_kind, trigger_evidence_ref_id, retry_of_task_id,
     chat_input_task_id, fire_at,
-    channel_context_revision, handoff_note, workflow_step, id
+    channel_context_revision, handoff_note, workflow_step, dedupe_key, id
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
@@ -514,14 +515,17 @@ SELECT
     CASE WHEN p.context->>'wakeup_id' IS NOT NULL OR p.workflow_step IS NOT NULL THEN p.handoff_note END,
     -- A retry continues its parent's work, so it keeps the parent's step (MUL-7420).
     p.workflow_step,
+    -- A review retry keeps the round key, so it cannot race a new mention or
+    -- wakeup into a second active review task.
+    p.dedupe_key,
     -- Named new_task_id, not id: $1 above is the PARENT task's id.
     COALESCE(sqlc.narg('new_task_id')::uuid, gen_random_uuid())
 FROM agent_task_queue p
 WHERE p.id = $1
   AND lock_task_owner_rows(p.agent_id, p.issue_id, p.runtime_id)
-ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE status IN ('queued', 'dispatched')
-       OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
-DO NOTHING
+-- Any active-slot conflict means the retry has no row to add: the pending
+-- thread slot, or a review round another trigger already re-claimed.
+ON CONFLICT DO NOTHING
 RETURNING *;
 
 -- name: SetTaskWorkflowStep :exec
@@ -1685,6 +1689,51 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
   )
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid);
 
+-- name: GetActiveReviewTaskByDedupeKey :one
+-- The single live task for a review round. deferred auto-retries hold the key
+-- until they are promoted and run, so they count as live. The partial unique
+-- index guarantees at most one row; the ordering only makes the result
+-- deterministic while a stale build exists during a rolling deploy.
+SELECT * FROM agent_task_queue
+WHERE dedupe_key = $1
+  AND status IN ('queued', 'deferred', 'dispatched', 'running', 'waiting_local_directory')
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
+-- name: CancelStaleReviewTasks :many
+-- A new review round supersedes unstarted work from the previous round. Rows
+-- that already started are not cancelled: they finish, but the generation
+-- guard in the review-result path keeps them from publishing a stale verdict.
+UPDATE agent_task_queue
+SET status = 'cancelled',
+    completed_at = now(),
+    failure_reason = 'review_superseded',
+    cancelled_by_type = 'system',
+    cancelled_by_name = 'review_superseded'
+WHERE issue_id = @issue_id
+  AND agent_id = @agent_id
+  AND dedupe_key IS NOT NULL
+  AND dedupe_key LIKE 'review:%'
+  AND dedupe_key <> @keep_key
+  AND status IN ('queued', 'deferred')
+RETURNING *;
+
+-- name: MarkStaleReviewTasksSuperseded :many
+-- Started tasks cannot be safely cancelled by a newer round. Mark them so the
+-- review-result dispatch refuses their verdict without interrupting the run.
+UPDATE agent_task_queue
+SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object(
+        'review_superseded', TRUE,
+        'review_superseded_by', @keep_key
+    )
+WHERE issue_id = @issue_id
+  AND agent_id = @agent_id
+  AND dedupe_key IS NOT NULL
+  AND dedupe_key LIKE 'review:%'
+  AND dedupe_key <> @keep_key
+  AND status IN ('dispatched', 'running', 'waiting_local_directory')
+RETURNING *;
+
 -- name: MergeCommentIntoPendingTask :one
 -- MUL-4195: fold a newly-arrived comment into an existing task for (issue,
 -- agent) that has NOT yet been claimed, instead of letting the
@@ -1754,12 +1803,41 @@ SET coalesced_comment_ids = (
     runtime_connected_apps = sqlc.narg('new_runtime_connected_apps')
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
-    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+    -- Review tasks created by a wakeup are valid merge targets; ordinary
+    -- wakeup runs still stay outside comment coalescing.
+    WHERE (
+          t.context->>'wakeup_id' IS NULL
+          OR (
+              sqlc.narg('review_dedupe_key')::text IS NOT NULL
+              AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+          )
+      )
+      AND t.issue_id = @issue_id
       AND t.agent_id = @agent_id
-      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
+      -- A review task covers the whole issue/round, so its comment is folded
+      -- regardless of thread. Ordinary mention tasks stay thread-scoped.
+      AND (
+          (
+              sqlc.narg('review_dedupe_key')::text IS NOT NULL
+              AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+          )
+          OR (
+              sqlc.narg('review_dedupe_key')::text IS NULL
+              AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
+          )
+      )
       AND (
           t.status = 'queued'
-          OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
+          OR (
+              t.status = 'deferred'
+              AND (
+                  t.context->>'channel_issue_media_pending' = 'true'
+                  OR (
+                      sqlc.narg('review_dedupe_key')::text IS NOT NULL
+                      AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+                  )
+              )
+          )
       )
       -- Head-scoped (TEN-356, #5914): never fold across HEADs. The physical
       -- unique index is per (issue_id, agent_id, thread), so an insert-race loser can
@@ -1767,7 +1845,8 @@ WHERE id = (
       -- into it would give a new-HEAD comment old-HEAD review coverage. Empty/
       -- absent head_sha (no linked PR) matches any task, preserving coalescing.
       AND (
-          COALESCE(sqlc.narg('head_sha')::text, '') = ''
+          sqlc.narg('review_dedupe_key')::text IS NOT NULL
+          OR COALESCE(sqlc.narg('head_sha')::text, '') = ''
           OR t.context->>'head_sha' = sqlc.narg('head_sha')::text
       )
     ORDER BY t.created_at DESC
@@ -1810,12 +1889,29 @@ SET coalesced_comment_ids = (
     )
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
-    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+    WHERE (
+          t.context->>'wakeup_id' IS NULL
+          OR (
+              sqlc.narg('review_dedupe_key')::text IS NOT NULL
+              AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+          )
+      )
+      AND t.issue_id = @issue_id
       AND t.agent_id = @agent_id
-      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
+      AND (
+          (
+              sqlc.narg('review_dedupe_key')::text IS NOT NULL
+              AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+          )
+          OR (
+              sqlc.narg('review_dedupe_key')::text IS NULL
+              AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
+          )
+      )
       AND t.status IN ('dispatched', 'running', 'waiting_local_directory')
       AND (
-          COALESCE(sqlc.narg('head_sha')::text, '') = ''
+          sqlc.narg('review_dedupe_key')::text IS NOT NULL
+          OR COALESCE(sqlc.narg('head_sha')::text, '') = ''
           OR t.context->>'head_sha' = sqlc.narg('head_sha')::text
       )
     ORDER BY t.created_at DESC

@@ -4090,7 +4090,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	reviewDispatch := reviewResultDispatch{}
 	if statusChanged {
 		dispatchCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
-		reviewDispatch = h.dispatchReviewResult(dispatchCtx, prevIssue, issue, actorType, actorID)
+		reviewDispatch = h.dispatchReviewResult(dispatchCtx, prevIssue, issue, actorType, actorID, callerRun)
 		cancel()
 	}
 	// project_changed gates the client's per-project issue-list refetch the way
