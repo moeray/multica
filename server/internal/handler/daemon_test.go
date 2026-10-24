@@ -2552,6 +2552,89 @@ func TestCompleteTask_CommentTriggered_SynthesizesCommentWhenAgentSilent(t *test
 	}
 }
 
+// A delivered run whose disposable worktree could not be fully removed must
+// stay completed. The API exposes a cleanup warning/outcome, and the issue
+// timeline gets one system note instead of a crash-style failure comment.
+func TestCompleteTask_CleanupWarningCompletesAndRecordsSystemNote(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	var agentID, runtimeID string
+	dbfx.QueryRow(t, `
+		SELECT a.id, a.runtime_id FROM agent a WHERE a.workspace_id = $1 LIMIT 1
+	`, testWorkspaceID).Scan(&agentID, &runtimeID)
+
+	setWorkspaceIssuePrefixForTest(t, "MUL")
+	issueID := dbfx.Issue(t, "mul-58 cleanup warning fixture", testutil.Cols{
+		"status": "in_progress",
+		"number": 58058,
+	})
+	triggerCommentID := dbfx.Comment(t, issueID, "please deliver this")
+	taskID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id":         runtimeID,
+		"issue_id":           issueID,
+		"trigger_comment_id": triggerCommentID,
+		"status":             "running",
+		"started_at":         testutil.Raw("now()"),
+	})
+
+	const warning = "unlinkat C:\\task\\node_modules\\esbuild.exe: Access is denied"
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/complete",
+		map[string]any{"output": "", "cleanup_warning": warning},
+		testWorkspaceID, "legit-daemon")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("taskId", taskID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	testHandler.CompleteTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CompleteTask: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp AgentTaskResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode complete response: %v", err)
+	}
+	if resp.Status != "completed" {
+		t.Errorf("status = %q, want completed", resp.Status)
+	}
+	if resp.CompletionOutcome != "completed_with_cleanup_warning" {
+		t.Errorf("completion_outcome = %q, want completed_with_cleanup_warning", resp.CompletionOutcome)
+	}
+	if resp.CleanupWarning != warning {
+		t.Errorf("cleanup_warning = %q, want %q", resp.CleanupWarning, warning)
+	}
+	if resp.FailureReason != "" {
+		t.Errorf("failure_reason = %q, want empty for a delivered run", resp.FailureReason)
+	}
+
+	var status, failureReason string
+	if err := testPool.QueryRow(ctx, `
+		SELECT status, COALESCE(failure_reason, '') FROM agent_task_queue WHERE id = $1
+	`, taskID).Scan(&status, &failureReason); err != nil {
+		t.Fatalf("load completed task: %v", err)
+	}
+	if status != "completed" || failureReason != "" {
+		t.Errorf("persisted task = (%s, %q), want (completed, \"\")", status, failureReason)
+	}
+
+	var content string
+	if err := testPool.QueryRow(ctx, `
+		SELECT content FROM comment
+		WHERE issue_id = $1 AND author_type = 'system' AND type = 'system'
+		ORDER BY created_at DESC LIMIT 1
+	`, issueID).Scan(&content); err != nil {
+		t.Fatalf("load cleanup warning comment: %v", err)
+	}
+	if !strings.Contains(content, "Delivered successfully") || !strings.Contains(content, "worktree could not be fully cleaned up") {
+		t.Errorf("cleanup warning comment = %q, want a delivered-with-cleanup-warning note", content)
+	}
+}
+
 // Companion to the above: when the agent DID post its own comment during the
 // run, CompleteTask must not synthesize a duplicate. Guards against the
 // common case where the fix is over-eager and creates two comments per task.

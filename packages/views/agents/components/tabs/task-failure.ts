@@ -150,6 +150,8 @@ type TaskOutcome = {
   error?: string | null;
   failure_reason?: string | null;
   cancelled_by?: { type: string; name?: string };
+  cleanup_warning?: string | null;
+  completion_outcome?: string | null;
 };
 
 /** A run that was stopped rather than one that broke. */
@@ -164,10 +166,26 @@ export function failureNeedsAction(task: TaskOutcome): boolean {
 }
 
 /**
- * The one label for how a failed or cancelled run ended: its recorded reason,
- * else who cancelled it. Null when only the plain status is known.
+ * A completed run that delivered its work but could not fully remove the
+ * disposable task worktree. The branch and commit are already durable; only
+ * cleanup residue remains.
+ */
+export function hasCleanupWarning(task: TaskOutcome): boolean {
+  return task.status === "completed"
+    && (!!task.cleanup_warning?.trim() || task.completion_outcome === "completed_with_cleanup_warning");
+}
+
+export function cleanupWarningLabel(t: AgentsT): string {
+  return t(($) => $.task_failure.cleanup_warning);
+}
+
+/**
+ * The one label for how a terminal run ended: a delivered-with-cleanup-warning
+ * outcome, a failed run's recorded reason, or who cancelled it. Null when only
+ * the plain status is known.
  */
 export function runOutcomeLabel(task: TaskOutcome, t: AgentsT): string | null {
+  if (hasCleanupWarning(task)) return cleanupWarningLabel(t);
   if (task.status === "failed") return failureReasonLabel(task.failure_reason, t);
   return cancelReasonLabel(task, t) ?? cancellationActorLabel(task, t);
 }

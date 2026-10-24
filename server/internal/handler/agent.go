@@ -455,7 +455,7 @@ type AgentTaskResponse struct {
 	// WorkDir directly; newer UIs should prefer RelativeWorkDir.
 	RelativeWorkDir string `json:"relative_work_dir,omitempty"`
 	// DurableWorkDir is the daemon-confirmed directory that remains usable
-	// after a disposable task worktree has been finalized and removed. It is a
+	// after a disposable task worktree has been finalized. It is a
 	// point-in-time task snapshot and does not follow later resource edits.
 	DurableWorkDir string `json:"durable_work_dir,omitempty"`
 	// RelativeDurableWorkDir is the privacy-safe display form. The absolute
@@ -466,7 +466,14 @@ type AgentTaskResponse struct {
 	// verbatim: it is a ref inside the user's own repo, not a filesystem path.
 	// Populated on both terminal paths — a failed run can still have committed
 	// partial work, and that is when the pointer matters most.
-	BranchName            string                 `json:"branch_name,omitempty"`
+	BranchName string `json:"branch_name,omitempty"`
+	// CleanupWarning is set when the run completed and delivered its work but
+	// the disposable task worktree could not be fully removed. It is a
+	// warning, not a failure.
+	CleanupWarning string `json:"cleanup_warning,omitempty"`
+	// CompletionOutcome distinguishes a plain completion from one that
+	// delivered successfully but left worktree cleanup residue.
+	CompletionOutcome     string                 `json:"completion_outcome,omitempty"`
 	TriggerCommentID      *string                `json:"trigger_comment_id,omitempty"`    // comment that triggered this task
 	CoalescedCommentIDs   []string               `json:"coalesced_comment_ids,omitempty"` // MUL-4195: earlier comments folded into this run when it had not yet started, so a single run still covers every deliberate comment; trigger_comment_id is the newest. Surfaced so the UI can show which comments a run covered. omitempty so old clients ignore it
 	CoalescedComments     []CoalescedCommentData `json:"coalesced_comments,omitempty"`    // MUL-4195: full detail (thread_id/author/created_at/content) of the folded comments, so the daemon prompt can address each without assuming they share the triggering thread. omitempty so old clients ignore it
@@ -817,6 +824,20 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 	if t.Result != nil {
 		json.Unmarshal(t.Result, &result)
 	}
+	var completion struct {
+		CleanupWarning string `json:"cleanup_warning"`
+	}
+	if t.Result != nil {
+		_ = json.Unmarshal(t.Result, &completion)
+	}
+	cleanupWarning := strings.TrimSpace(completion.CleanupWarning)
+	completionOutcome := ""
+	if t.Status == "completed" {
+		completionOutcome = "completed"
+		if cleanupWarning != "" {
+			completionOutcome = "completed_with_cleanup_warning"
+		}
+	}
 	failureReason := ""
 	if t.FailureReason.Valid {
 		failureReason = t.FailureReason.String
@@ -861,6 +882,8 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		Error:                  textToPtr(t.Error),
 		FailureReason:          failureReason,
 		BranchName:             branchName,
+		CleanupWarning:         cleanupWarning,
+		CompletionOutcome:      completionOutcome,
 		Attempt:                t.Attempt,
 		MaxAttempts:            t.MaxAttempts,
 		ParentTaskID:           uuidToPtr(t.ParentTaskID),

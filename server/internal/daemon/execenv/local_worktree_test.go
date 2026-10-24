@@ -567,6 +567,49 @@ func TestFinalizeKeepsWorktreeWhenCommitFails(t *testing.T) {
 	}
 }
 
+// A delivered run must not fail just because Windows still holds a hard-linked
+// file inside the disposable worktree (the esbuild.exe case). The branch is
+// committed and recorded before removal, so Finalize reports a cleanup warning
+// and leaves the delivered work untouched.
+func TestFinalizeReportsCleanupWarningWhenWorktreeRemovalFails(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+
+	writeFile(t, filepath.Join(wt.Path, "agent-output.txt"), "delivered work\n")
+	wt.removeDir = func(_, _ string, _ *slog.Logger) error {
+		return errors.New("unlinkat C:\\task\\node_modules\\esbuild.exe: Access is denied")
+	}
+
+	outcome, err := wt.Finalize(worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("Finalize returned an error for a cleanup-only failure: %v", err)
+	}
+	if outcome.CleanupWarning == "" {
+		t.Fatal("CleanupWarning is empty; the removal failure was not reported")
+	}
+	if !strings.Contains(outcome.CleanupWarning, "Access is denied") {
+		t.Errorf("CleanupWarning does not preserve the removal cause: %q", outcome.CleanupWarning)
+	}
+	if outcome.PreservedPath != "" {
+		t.Errorf("PreservedPath = %q, want empty: delivery succeeded and only cleanup residue remains", outcome.PreservedPath)
+	}
+	if outcome.Branch == "" {
+		t.Fatal("Branch is empty; the delivered branch must survive a cleanup warning")
+	}
+	// The work is committed on the branch, not stranded in the worktree.
+	if got := gitRun(t, repo, "show", outcome.Branch+":agent-output.txt"); got != "delivered work" {
+		t.Errorf("delivered branch content = %q, want the agent's work", got)
+	}
+	// The residual directory must not keep a dangling git worktree registration.
+	if list := gitRun(t, repo, "worktree", "list"); strings.Contains(list, filepath.ToSlash(wt.Path)) {
+		t.Errorf("residual worktree is still registered:\n%s", list)
+	}
+	if err := os.RemoveAll(wt.Path); err != nil {
+		t.Logf("remove residual test worktree: %v", err)
+	}
+}
+
 // An in_place task on the same directory leaves .agent_context/ and .multica/
 // in the user's tree while it runs. A concurrent worktree snapshot sees them as
 // untracked files; copying them would hand this task another issue's brief and

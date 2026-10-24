@@ -740,6 +740,7 @@
     "status_waiting_local_directory": "En attente du répertoire local",
     "status_running": "Au travail",
     "status_completed": "Terminée",
+    "cleanup_warning": "Livré ; nettoyage échoué",
     "status_failed": "En échec",
     "status_cancelled": "Annulée",
     "attribution": {

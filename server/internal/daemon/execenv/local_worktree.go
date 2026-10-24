@@ -206,6 +206,9 @@ type LocalWorktree struct {
 	// Set by the daemon when a pre-commit step failed in a way that would make
 	// the committed branch wrong (see AbortWithReason).
 	aborted error
+	// removeDir overrides worktree directory removal in tests. Production
+	// always uses removeLocalWorktreeDir.
+	removeDir func(gitRoot, worktreePath string, logger *slog.Logger) error
 }
 
 // MarshalJSON / UnmarshalJSON carry this struct's unexported state across the
@@ -279,6 +282,10 @@ type LocalWorktreeOutcome struct {
 	// changes. The worktree at this path was intentionally left on disk because
 	// it is the only remaining copy of that work.
 	PreservedPath string
+	// CleanupWarning is set when the task was delivered but the disposable
+	// worktree could not be fully removed. Delivery is already committed and
+	// recorded, so this is a cleanup warning rather than a task failure.
+	CleanupWarning string
 }
 
 // PrepareLocalWorktree creates the task's worktree and replays the user's
@@ -506,9 +513,9 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	return wt, nil
 }
 
-// Finalize commits whatever the agent left behind, removes the worktree, and
-// reports the branch. Called after the agent exits, before the env root is
-// handed to the GC.
+// Finalize commits whatever the agent left behind, attempts to remove the
+// worktree, and reports the branch. Called after the agent exits, before the
+// env root is handed to the GC.
 //
 // The auto-commit is the reason a worktree task can't lose work: `git worktree
 // remove --force` would happily delete uncommitted edits, and the user would
@@ -522,6 +529,12 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 // in the daemon log is not an acceptable substitute for the user's changes. The
 // surviving worktree stays registered in the user's repo, so `git worktree list`
 // points straight at it.
+//
+// Once the commit and delivery record are durable, a failure to remove the
+// directory is a cleanup problem, not a delivery failure. Finalize reports it
+// in CleanupWarning and still returns nil: on Windows a long-lived process can
+// hold a hard-linked node_modules file open, and that must not turn a delivered
+// run into an agent crash.
 func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, error) {
 	if w == nil {
 		return LocalWorktreeOutcome{}, nil
@@ -681,11 +694,29 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 	}
 
-	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
-		outcome.PreservedPath = w.Path
-		return outcome, fmt.Errorf(
-			"could not remove finalized worktree for branch %s: %w; the task worktree remains at %s",
+	removeDir := removeLocalWorktreeDir
+	if w.removeDir != nil {
+		removeDir = w.removeDir
+	}
+	if removeErr := removeDir(w.GitRoot, w.Path, logger); removeErr != nil {
+		// The branch is committed and its delivery point recorded above. A
+		// removal failure (on Windows, routinely a locked node_modules file
+		// hard-linked into the user's checkout) no longer risks losing work, so
+		// it must not turn a delivered run into an agent failure. Drop the
+		// registration when possible and surface a cleanup warning instead.
+		if logger != nil {
+			logger.Warn("execenv: worktree cleanup incomplete after delivery; reporting a cleanup warning",
+				"path", w.Path, "branch", w.Branch, "error", removeErr)
+		}
+		if dropped {
+			dropBranch(w.GitRoot, w.Branch, logger)
+			outcome.Branch = ""
+		}
+		unregisterResidualWorktree(w.GitRoot, w.Path, logger)
+		outcome.CleanupWarning = fmt.Sprintf(
+			"could not fully remove the task worktree for branch %s: %v; the delivered work is on the branch, and the residual directory is %s",
 			w.Branch, removeErr, w.Path)
+		return outcome, nil
 	}
 
 	if dropped {
@@ -703,6 +734,44 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		)
 	}
 	return outcome, nil
+}
+
+// unregisterResidualWorktree removes a leftover worktree registration after a
+// best-effort directory removal. The linked worktree's .git file is what keeps
+// `git worktree list` pointing at the residual directory; deleting it and
+// pruning drops the registration without touching the branch or the user's
+// repository. Best-effort: the warning already names the residual path.
+func unregisterResidualWorktree(gitRoot, worktreePath string, logger *slog.Logger) {
+	gitFile := filepath.Join(worktreePath, ".git")
+	if data, err := os.ReadFile(gitFile); err == nil {
+		// A linked worktree's .git file points at its registration under the
+		// repository's .git/worktrees. Removing that registration is what
+		// `git worktree prune` would do once the directory is gone; here the
+		// directory remains because a file inside it is locked.
+		if target, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: "); ok {
+			target = strings.TrimSpace(target)
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(worktreePath, target)
+			}
+			worktreesDir := filepath.Join(gitRoot, ".git", "worktrees")
+			if rel, relErr := filepath.Rel(worktreesDir, target); relErr == nil && rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+				if rmErr := os.RemoveAll(target); rmErr != nil && logger != nil {
+					logger.Warn("execenv: could not remove residual worktree registration",
+						"path", target, "error", rmErr)
+				}
+			}
+		}
+	}
+	if info, err := os.Lstat(gitFile); err == nil && !info.IsDir() {
+		if rmErr := os.Remove(gitFile); rmErr != nil && logger != nil {
+			logger.Warn("execenv: could not remove residual worktree .git file",
+				"path", gitFile, "error", rmErr)
+		}
+	}
+	if out, err := runGit(gitRoot, "worktree", "prune"); err != nil && logger != nil {
+		logger.Warn("execenv: prune residual worktree registration failed",
+			"git_root", gitRoot, "path", worktreePath, "output", strings.TrimSpace(out), "error", err)
+	}
 }
 
 // Discard tears a worktree down without delivering anything: unregister it,

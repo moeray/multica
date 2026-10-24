@@ -35,6 +35,7 @@ func TestTerminalReportStoreRoundTripAndPermissions(t *testing.T) {
 		durableWorkDir:        "/private/project",
 		sessionRolloutMissing: true,
 		retiredSessionID:      "retired-private",
+		cleanupWarning:        "Access is denied",
 	}
 	if err := store.enqueue(report); err != nil {
 		t.Fatalf("enqueue terminal report: %v", err)

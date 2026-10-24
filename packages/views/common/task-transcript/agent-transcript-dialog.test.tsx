@@ -249,6 +249,20 @@ afterEach(() => {
 });
 
 describe("AgentTranscriptDialog", () => {
+  it("shows a delivered-with-cleanup-warning notice instead of a crash", () => {
+    renderDialog([], {
+      task: {
+        ...baseTask,
+        cleanup_warning: "unlinkat C:\\task\\node_modules\\esbuild.exe: Access is denied",
+        completion_outcome: "completed_with_cleanup_warning",
+      },
+    });
+
+    expect(screen.getByText("Delivered; cleanup failed")).toBeInTheDocument();
+    expect(screen.getByText(/The branch and commit were delivered/)).toBeInTheDocument();
+    expect(screen.queryByText(/crashed/i)).toBeNull();
+  });
+
   it.each([
     { type: "text", label: "Agent", icon: ".lucide-bot" },
     { type: "thinking", label: "Thinking", icon: ".lucide-brain" },

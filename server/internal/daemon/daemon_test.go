@@ -5248,11 +5248,12 @@ func TestReportTaskResult_CompletedHitsCompleteEndpoint(t *testing.T) {
 
 	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
 	d.reportTaskResult(context.Background(), "task-1", TaskResult{
-		Status:     "completed",
-		Comment:    "all good",
-		BranchName: "agent/foo",
-		SessionID:  "ses-1",
-		WorkDir:    "/tmp/foo",
+		Status:         "completed",
+		Comment:        "all good",
+		BranchName:     "agent/foo",
+		SessionID:      "ses-1",
+		WorkDir:        "/tmp/foo",
+		CleanupWarning: "could not remove worktree: Access is denied",
 	}, slog.Default())
 
 	rec.mu.Lock()
@@ -5268,6 +5269,40 @@ func TestReportTaskResult_CompletedHitsCompleteEndpoint(t *testing.T) {
 	}
 	if rec.payload["session_id"] != "ses-1" {
 		t.Errorf("session_id: got %v", rec.payload["session_id"])
+	}
+	if rec.payload["cleanup_warning"] != "could not remove worktree: Access is denied" {
+		t.Errorf("cleanup_warning: got %v", rec.payload["cleanup_warning"])
+	}
+}
+
+// A real execution failure stays a failure even when its cleanup also warned.
+// The warning rides the completion callback only; it must never reclassify a
+// blocked run as delivered.
+func TestReportTaskResult_FailureWithCleanupWarningStillFails(t *testing.T) {
+	t.Parallel()
+
+	rec := &reportTaskResultRecorder{}
+	srv := httptest.NewServer(rec.handler(t))
+	t.Cleanup(srv.Close)
+
+	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
+	d.reportTaskResult(context.Background(), "task-2", TaskResult{
+		Status:         "blocked",
+		Comment:        "compile failed: undefined symbol",
+		FailureReason:  "agent_error.process_failure",
+		CleanupWarning: "could not remove worktree: Access is denied",
+	}, slog.Default())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.path != "/api/daemon/tasks/task-2/fail" {
+		t.Fatalf("expected /fail endpoint for a blocked run, got %s", rec.path)
+	}
+	if rec.payload["failure_reason"] != "agent_error.process_failure" {
+		t.Errorf("failure_reason: got %v", rec.payload["failure_reason"])
+	}
+	if _, ok := rec.payload["cleanup_warning"]; ok {
+		t.Errorf("failure callback must not carry a completion cleanup warning: %v", rec.payload["cleanup_warning"])
 	}
 }
 

@@ -712,6 +712,7 @@
     "status_waiting_local_directory": "로컬 디렉터리 대기 중",
     "status_running": "작업 중",
     "status_completed": "완료됨",
+    "cleanup_warning": "전달됨, 정리 실패",
     "status_failed": "실패함",
     "status_cancelled": "취소됨",
     "attribution": {

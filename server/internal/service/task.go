@@ -7584,6 +7584,62 @@ func (s *TaskService) createAgentComment(ctx context.Context, issueID, agentID p
 	s.AutoUnresolveThreadOnReply(ctx, rootComment, util.UUIDToString(issue.WorkspaceID), "agent", util.UUIDToString(agentID), sourceTaskID)
 }
 
+// RecordWorktreeCleanupWarning leaves one system comment when a completed run
+// delivered its work but its disposable task worktree could not be fully
+// removed. The run is already completed, so this is best-effort: a failure to
+// write the note must not turn the terminal callback into an error.
+func (s *TaskService) RecordWorktreeCleanupWarning(ctx context.Context, task db.AgentTaskQueue, warning string) {
+	warning = strings.TrimSpace(warning)
+	if warning == "" || !task.IssueID.Valid {
+		return
+	}
+	issue, err := s.Queries.GetIssue(ctx, task.IssueID)
+	if err != nil {
+		slog.Warn("worktree cleanup warning: load issue failed",
+			"task_id", util.UUIDToString(task.ID),
+			"issue_id", util.UUIDToString(task.IssueID),
+			"error", err,
+		)
+		return
+	}
+	created, err := s.Queries.CreateComment(ctx, db.CreateCommentParams{
+		ID:           dbid.NewV7(),
+		IssueID:      issue.ID,
+		WorkspaceID:  issue.WorkspaceID,
+		AuthorType:   "system",
+		AuthorID:     pgtype.UUID{Valid: true},
+		Content:      "Delivered successfully, but the task worktree could not be fully cleaned up. The branch and commit are available; the remaining temporary files can be removed from the daemon host.",
+		Type:         "system",
+		ParentID:     task.TriggerCommentID,
+		SourceTaskID: task.ID,
+	})
+	if err != nil {
+		slog.Warn("worktree cleanup warning: create system comment failed",
+			"task_id", util.UUIDToString(task.ID),
+			"issue_id", util.UUIDToString(task.IssueID),
+			"error", err,
+		)
+		return
+	}
+	if s.Bus == nil {
+		return
+	}
+	comment := created.Comment()
+	fields := commentEventFields(comment)
+	fields["revision"] = comment.Revision
+	s.Bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
+		ActorType:   "system",
+		Payload: map[string]any{
+			"comment":        fields,
+			"issue_title":    issue.Title,
+			"issue_status":   issue.Status,
+			"issue_revision": created.IssueRevision,
+		},
+	})
+}
+
 // AutoUnresolveThreadOnReply clears resolved_at on the thread root when a
 // reply lands in a resolved thread, and broadcasts comment:unresolved. Shared
 // between the user-facing Handler.CreateComment path and the agent-facing

@@ -879,6 +879,9 @@
     "details_cost": "Coût",
     "usage_chip_title": "Tokens et coût estimé de cette exécution",
     "details_branch": "Branche",
+    "cleanup_warning_chip": "Livré ; nettoyage échoué",
+    "cleanup_warning_body": "La branche et le commit ont été livrés. Le worktree temporaire n'a pas pu être entièrement supprimé ; les fichiers restants peuvent être supprimés manuellement.",
+    "details_cleanup_warning": "Avertissement de nettoyage",
     "details_reason": "Motif",
     "details_diagnostics": "Détails techniques",
     "copy_branch": "Copier le nom de la branche",
@@ -919,6 +922,7 @@
   "task_failure": {
     "cancelled_by_system": "Annulée par le système",
     "cancelled_by_actor": "Annulée par {{name}}",
+    "cleanup_warning": "Livré ; le nettoyage du worktree a échoué",
     "reasons": {
       "queued_expired": "Délai d'attente dans la file expiré",
       "runtime_offline": "Daemon hors ligne",

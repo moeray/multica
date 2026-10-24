@@ -19,7 +19,13 @@ import {
 import { ActorAvatar } from "../../common/actor-avatar";
 import { formatDuration } from "../../agents/components/agent-activity-hover-content";
 import { TranscriptButton } from "../../common/task-transcript";
-import { cancellationActorLabel, cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
+import {
+  cancellationActorLabel,
+  cancelReasonLabel,
+  cleanupWarningLabel,
+  failureReasonLabel,
+  hasCleanupWarning,
+} from "../../agents/components/tabs/task-failure";
 import { useT } from "../../i18n";
 import { compareActiveIssueTasks } from "./active-task-order";
 import { formatDuration as formatAgentTime } from "../../dashboard/utils";
@@ -655,6 +661,7 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
     task.status === "failed"
       ? failureReasonLabel(task.failure_reason, tAgents)
       : cancelReasonLabel(task, tAgents);
+  const cleanupLabel = hasCleanupWarning(task) ? cleanupWarningLabel(tAgents) : null;
   const cancellationLabel = cancellationActorLabel(task, tAgents);
   // Hovering the status mark reveals the localized reason, never the raw
   // `task.error`. That field is operator-facing English prose the daemon and
@@ -665,7 +672,7 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
   // in the transcript's Run details.
   const statusTitle = cancellationLabel
     ? [cancellationLabel, failureLabel].filter(Boolean).join(" · ")
-    : failureLabel ?? label;
+    : [cleanupLabel, failureLabel].filter(Boolean).join(" · ") || label;
 
   // What this run cost sits on the first line, beside the trigger people scan
   // the list for; the second line says who ran it and how — the reason it
@@ -676,16 +683,28 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
   // `null` (no usage recorded) renders an em dash, never $0: a run from before
   // usage reporting was not free, we simply have no figure for it.
   const usage = summarizeTaskUsage(task.usage);
-  const reason = cancellationLabel
+  const reason = cleanupLabel ?? (cancellationLabel
     ? [cancellationLabel, failureLabel].filter(Boolean).join(" · ")
-    : failureLabel;
+    : failureLabel);
   const rowTitle = [time, usage?.models.join(", ") ?? ""].filter(Boolean).join(" · ");
   const meta: { key: string; node: React.ReactNode }[] = [];
   if (task.agent_id) meta.push({ key: "agent", node: getActorName("agent", task.agent_id) });
   if (reason) {
     meta.push({
       key: "reason",
-      node: <span className={task.status === "failed" ? "text-destructive" : undefined}>{reason}</span>,
+      node: (
+        <span
+          className={
+            task.status === "failed"
+              ? "text-destructive"
+              : cleanupLabel
+                ? "text-warning"
+                : undefined
+          }
+        >
+          {reason}
+        </span>
+      ),
     });
   } else if (task.started_at && task.completed_at) {
     const seconds = (new Date(task.completed_at).getTime() - new Date(task.started_at).getTime()) / 1000;
