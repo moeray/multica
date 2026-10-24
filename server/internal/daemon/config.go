@@ -121,8 +121,10 @@ type Config struct {
 	GCTTL                          time.Duration         // clean dirs whose issue is done/cancelled and updated_at < now()-TTL (default: 24h)
 	GCCompletedTaskTTL             time.Duration         // fully clean inactive issue-task envs completed at least this long ago, regardless of parent issue status (default: 14d on Multica Cloud, 0/disabled elsewhere; local_directory envs are never fully removed)
 	GCOrphanTTL                    time.Duration         // clean orphan dirs with no meta, or dirs whose issue gc-check returns 404, once they exceed this age (default: 72h). The 404 path uses the same TTL — a scoped-down token can't instantly wipe live workspaces.
+	GCDryRun                       bool                  // report cleanup candidates without deleting anything (default: false)
 	GCArtifactTTL                  time.Duration         // once a task has been completed for at least this long, drop regenerable artifacts: pattern-matched build outputs when the parent record keeps the directory (an open issue), and the exact daemon-managed Codex cache for every task kind (default: 12h, set 0 to disable both)
 	GCArtifactPatterns             []string              // basename patterns whose subtrees are removed during artifact cleanup (default: node_modules, .next, .turbo)
+	WorktreePackageImportMethod    string                // pnpm package-import-method exported to local worktree agents (default: copy on Windows, auto elsewhere)
 	GCRepoTTL                      time.Duration         // evict a cached bare repo under .repos once no task has created a worktree from it for this long, it has no worktrees left, and it is no longer attached to any watched workspace (default: 30d, set 0 to disable)
 	GCRepoMaintenanceEnabled       bool                  // run reflog expiry and git gc after stale agent refs are removed (default: true; disable independently as an operational kill switch)
 	GCCodexSessionTTL              time.Duration         // reclaim a per-issue Codex session store (~/.codex/multica-sessions/<agent>/<issue>) untouched for at least this long, so a done/abandoned issue's conversation history does not accumulate forever (default: 14d, set 0 to disable)
@@ -564,6 +566,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	gcDryRun := boolFromEnv("MULTICA_GC_DRY_RUN", false)
 	gcArtifactTTL, err := durationFromEnv("MULTICA_GC_ARTIFACT_TTL", DefaultGCArtifactTTL)
 	if err != nil {
 		return Config{}, err
@@ -590,6 +593,12 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 	gcRepoMaintenanceEnabled := boolFromEnv("MULTICA_GC_REPO_MAINTENANCE_ENABLED", true)
 	gcArtifactPatterns := patternsFromEnv("MULTICA_GC_ARTIFACT_PATTERNS", DefaultGCArtifactPatterns)
+	worktreePackageImportMethod, err := worktreePackageImportMethodFromEnv(
+		"MULTICA_WORKTREE_PACKAGE_IMPORT_METHOD", runtime.GOOS,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 
 	// Auto-update config: default -> env override -> CLI override.
 	//
@@ -638,8 +647,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		GCTTL:                           gcTTL,
 		GCCompletedTaskTTL:              gcCompletedTaskTTL,
 		GCOrphanTTL:                     gcOrphanTTL,
+		GCDryRun:                        gcDryRun,
 		GCArtifactTTL:                   gcArtifactTTL,
 		GCArtifactPatterns:              gcArtifactPatterns,
+		WorktreePackageImportMethod:     worktreePackageImportMethod,
 		GCRepoTTL:                       gcRepoTTL,
 		GCRepoMaintenanceEnabled:        gcRepoMaintenanceEnabled,
 		GCCodexSessionTTL:               gcCodexSessionTTL,
@@ -807,6 +818,27 @@ func patternsFromEnv(name string, defaults []string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+// worktreePackageImportMethodFromEnv selects how pnpm materialises packages
+// into an agent's disposable worktree. The Windows default is copy: pnpm's
+// hardlink mode shares the store's file identity with the daemon's main
+// checkout, so a long-lived esbuild process there makes the task worktree
+// impossible to delete. Other platforms keep pnpm's own auto choice.
+func worktreePackageImportMethodFromEnv(name, goos string) (string, error) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if raw == "" {
+		if goos == "windows" {
+			return "copy", nil
+		}
+		return "auto", nil
+	}
+	switch raw {
+	case "auto", "copy", "hardlink", "clone":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("%s must be one of auto, copy, hardlink, or clone (got %q)", name, raw)
+	}
 }
 
 func shellArgsFromEnv(name string) ([]string, error) {

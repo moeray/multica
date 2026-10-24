@@ -67,11 +67,12 @@ type HealthResponse struct {
 	// Terminal report queue diagnostics are additive and expose only counts and
 	// bytes, never payloads or local paths. Failed records require operator
 	// attention; pending records are still being replayed automatically.
-	PendingTerminalReportCount int      `json:"pending_terminal_report_count"`
-	PendingTerminalReportBytes int64    `json:"pending_terminal_report_bytes"`
-	FailedTerminalReportCount  int      `json:"failed_terminal_report_count"`
-	FailedTerminalReportBytes  int64    `json:"failed_terminal_report_bytes"`
-	Agents                     []string `json:"agents"`
+	PendingTerminalReportCount int        `json:"pending_terminal_report_count"`
+	PendingTerminalReportBytes int64      `json:"pending_terminal_report_bytes"`
+	FailedTerminalReportCount  int        `json:"failed_terminal_report_count"`
+	FailedTerminalReportBytes  int64      `json:"failed_terminal_report_bytes"`
+	LastGC                     *GCMetrics `json:"last_gc,omitempty"`
+	Agents                     []string   `json:"agents"`
 	// SkippedAgents maps a provider that WAS discovered on this machine to the
 	// reason the last registration round dropped it (version undetectable,
 	// below the minimum supported version). Purely diagnostic, and omitted when
@@ -378,6 +379,7 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 			resp.FailedTerminalReportCount = stats.FailedCount
 			resp.FailedTerminalReportBytes = stats.FailedBytes
 		}
+		resp.LastGC = d.lastGC.Load()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)

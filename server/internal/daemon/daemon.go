@@ -642,6 +642,7 @@ type Daemon struct {
 	// /health dimensions and must never replace activeTasks in safety barriers.
 	runningTasks      atomic.Int64
 	resourceWaitTasks atomic.Int64
+	lastGC            atomic.Pointer[GCMetrics]
 	ready             atomic.Bool // false until preflight completes; gates /health status (starting -> running)
 	// reloadPendingReason explains why a confirmed multica version change hasn't
 	// restarted the daemon yet (a task was running at the barrier check). Set
@@ -8238,6 +8239,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			if taskResult.EnvRoot == "" {
 				taskResult.EnvRoot = env.RootDir
 			}
+			env.LocalWorktree.ReclaimableArtifactPatterns = append(
+				[]string(nil), d.cfg.GCArtifactPatterns...,
+			)
 			outcome, finalizeErr := env.LocalWorktree.Finalize(taskLog)
 			if outcome.Branch != "" {
 				taskResult.BranchName = outcome.Branch
@@ -8531,6 +8535,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentCustomEnv = task.Agent.CustomEnv
 	}
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
+	applyWorktreePackageManagerEnv(agentEnv, env, d.cfg.WorktreePackageImportMethod)
+	if env.LocalWorktree != nil && d.cfg.WorktreePackageImportMethod != "auto" {
+		taskLog.Info("local_directory worktree: package import mode",
+			"package_manager", "pnpm",
+			"package_import_method", d.cfg.WorktreePackageImportMethod,
+		)
+	}
 	if provider == "reasonix" {
 		reasonixStateHome, err := prepareReasonixTaskStateHome(d.cfg.Profile, task.RuntimeID, task.AgentID)
 		if err != nil {
