@@ -751,6 +751,19 @@ UPDATE chat_message
 SET context_task_id = @child_task_id
 WHERE context_task_id = @parent_task_id;
 
+-- name: ReleaseChatContextMessagesFromTask :exec
+-- A turn cancelled BEFORE it was claimed never read the mirrored rows stamped
+-- to it at enqueue, so leaving the stamp would hide them from every later turn
+-- — the exact "swallowed mirror" MP-68 set out to remove (MP-73). Handing them
+-- back to the un-injected pool lets the next turn pick them up.
+--
+-- The caller owns the decision of WHETHER to release: only a never-dispatched
+-- task qualifies. A claimed turn already built its prompt from these rows, and
+-- dropping its stamp would inject them again next turn.
+UPDATE chat_message
+SET context_task_id = NULL
+WHERE context_task_id = @task_id;
+
 -- name: ListChatContextMessagesForTask :many
 -- The mirrored rows this turn must read, in transcript order. Keyed by the
 -- (chat_session_id, context_task_id) index; the session id is redundant to the
