@@ -31,9 +31,30 @@ func (h *Handler) dispatchReviewResult(
 	issue db.Issue,
 	actorType string,
 	actorID string,
+	callerRun *db.AgentTaskQueue,
 ) reviewResultDispatch {
 	if h.AgentMessages == nil || prevIssue.Status == issue.Status {
 		return reviewResultDispatch{}
+	}
+	// A verdict belongs to the round its run was enqueued for. Once the issue
+	// enters a newer review round, an older run may still finish (or a
+	// superseded run may still move the status), but its verdict must not be
+	// published as if it reviewed the newer handoff.
+	if callerRun != nil && service.IsReviewTask(*callerRun) {
+		if service.ReviewTaskSuperseded(*callerRun) {
+			slog.Info("review result suppressed: run was superseded by a newer round",
+				"issue_id", uuidToString(issue.ID),
+				"task_id", uuidToString(callerRun.ID))
+			return reviewResultDispatch{}
+		}
+		if generation, ok := service.ReviewGenerationFromTask(*callerRun); ok && generation != issue.ReviewGeneration {
+			slog.Info("review result suppressed: run reviewed an older generation",
+				"issue_id", uuidToString(issue.ID),
+				"task_id", uuidToString(callerRun.ID),
+				"run_generation", generation,
+				"issue_generation", issue.ReviewGeneration)
+			return reviewResultDispatch{}
+		}
 	}
 
 	session, err := service.ResolveIssueChatSession(ctx, h.Queries, issue)

@@ -1434,6 +1434,18 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 }
 
 func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTaskWithCommentPlanAndDedupe(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin, "")
+}
+
+// EnqueueMentionTaskForReview is the review-request creator used by
+// TaskService.RequestReview. The caller has already derived reviewKey from the
+// issue's current round; the row is inserted with that key so every trigger
+// source contends on the same partial unique index.
+func (s *TaskService) EnqueueMentionTaskForReview(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, origin RunOrigin, reviewKey string) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTaskWithCommentPlanAndDedupe(ctx, issue, agentID, triggerCommentID, nil, false, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, reviewKey)
+}
+
+func (s *TaskService) enqueueMentionTaskWithCommentPlanAndDedupe(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, dedupeKey string) (db.AgentTaskQueue, error) {
 	if err := guardIssueNotInTriage(ctx, s.Queries, issue.ID, origin); err != nil {
 		return db.AgentTaskQueue{}, err
 	}
@@ -1492,6 +1504,9 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 		// Stamp the reviewed head so dedup can distinguish this run's target
 		// from a later request against a new HEAD (TEN-356).
 		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+		// Review requests share one idempotency key per (issue, reviewer,
+		// round); ordinary mentions leave it NULL.
+		DedupeKey: pgtype.Text{String: dedupeKey, Valid: dedupeKey != ""},
 	})
 	if err != nil {
 		// A concurrent enqueue for the same (issue, agent) won the race and the
@@ -1502,6 +1517,11 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 		if isDuplicatePendingTaskErr(err) {
 			slog.Debug("mention task enqueue coalesced: pending task already exists", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
 			return db.AgentTaskQueue{}, ErrDuplicatePendingTask
+		}
+		// A review insert that hit its dedupe key returns no row. Keep the raw
+		// sentinel so RequestReview can resolve the winning task.
+		if dedupeKey != "" && errors.Is(err, pgx.ErrNoRows) {
+			return db.AgentTaskQueue{}, err
 		}
 		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
@@ -5712,6 +5732,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 		isLeader            bool
 		squadID             pgtype.UUID
 		coalescedCommentIDs []pgtype.UUID
+		sourceIsReviewTask  bool
 	)
 	if sourceTaskID.Valid {
 		sourceTask, err := s.Queries.GetAgentTask(ctx, sourceTaskID)
@@ -5734,6 +5755,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 		}
 		agentID = sourceTask.AgentID
 		isLeader = sourceTask.IsLeaderTask
+		sourceIsReviewTask = IsReviewTask(sourceTask)
 		// Carry the source task's squad provenance so a rerun of a leader
 		// task still injects the squad briefing at claim time (see migration
 		// 127 / daemon claim handler).
@@ -5796,6 +5818,26 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 		if !canInvoke(targetAgent) {
 			return nil, ErrRerunInvokeNotAllowed
 		}
+	}
+
+	// A manual re-review is the same review request as a mention or wakeup:
+	// one active task per (issue, reviewer, round). Repeating it while the
+	// round is already active returns that run instead of queueing a sibling.
+	if reviewKey, ok := ReviewTaskKey(issue, agentID); ok && (sourceIsReviewTask || !sourceTaskID.Valid) {
+		if err := s.SupersedeStaleReviewTasks(ctx, issue.ID, agentID, reviewKey); err != nil {
+			slog.Warn("review rerun: supersede stale review tasks failed",
+				"issue_id", util.UUIDToString(issue.ID),
+				"agent_id", util.UUIDToString(agentID),
+				"error", err,
+			)
+		}
+		result, err := s.RequestReview(ctx, issue, agentID, func(ctx context.Context, key string) (db.AgentTaskQueue, error) {
+			return s.enqueueRerunTaskWithDedupe(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, key)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &result.Task, nil
 	}
 
 	// Clear only the tasks that have not begun executing. Those are the rows the
@@ -5951,11 +5993,15 @@ func (s *TaskService) promoteNewestSurvivingComment(ctx context.Context, ids []p
 // (rerun_of_task_id) to reuse its workdir and, when the failure did not poison
 // the conversation, resume its session (MUL-4869).
 func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin) (db.AgentTaskQueue, error) {
+	return s.enqueueRerunTaskWithDedupe(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, rerunOfTaskID, origin, "")
+}
+
+func (s *TaskService) enqueueRerunTaskWithDedupe(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, dedupeKey string) (db.AgentTaskQueue, error) {
 	if issue.AssigneeType.String == "agent" && issue.AssigneeID.Valid &&
 		util.UUIDToString(issue.AssigneeID) == util.UUIDToString(agentID) {
 		return s.enqueueIssueTaskWithCommentPlan(ctx, issue, triggerCommentID, coalescedCommentIDs, true, "", actorUserID, rerunOfTaskID, pgtype.Timestamptz{}, origin)
 	}
-	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "", actorUserID, rerunOfTaskID, origin)
+	return s.enqueueMentionTaskWithCommentPlanAndDedupe(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "", actorUserID, rerunOfTaskID, origin, dedupeKey)
 }
 
 // The bulk terminal writes below are the sweeper, archive and daemon-recovery

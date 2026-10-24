@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -60,7 +61,7 @@ func TestDispatchReviewResultRejectsNonReviewerAgent(t *testing.T) {
 	h := *testHandler
 	h.AgentMessages = service.NewAgentMessageService(testHandler.Queries, events.New(), sender, "")
 
-	got := h.dispatchReviewResult(ctx, prevIssue, issue, "agent", intruderID)
+	got := h.dispatchReviewResult(ctx, prevIssue, issue, "agent", intruderID, nil)
 	if got.Delivered || got.SuppressStatusNotification {
 		t.Fatalf("non-reviewer dispatch = %+v, want no delivery", got)
 	}
@@ -73,7 +74,24 @@ func TestDispatchReviewResultRejectsNonReviewerAgent(t *testing.T) {
 		t.Fatalf("review_result rows written by a non-reviewer = %d, want 0", count)
 	}
 
-	h.dispatchReviewResult(ctx, prevIssue, issue, "agent", reviewerID)
+	// A review run from an older generation may still finish after the
+	// developer pushed a new handoff. It must not publish its verdict as if it
+	// reviewed the new round.
+	issue.ReviewGeneration = 1
+	staleRun := &db.AgentTaskQueue{
+		DedupeKey: pgtype.Text{String: fmt.Sprintf("review:%s:%s:0", issueID, reviewerID), Valid: true},
+	}
+	got = h.dispatchReviewResult(ctx, prevIssue, issue, "agent", reviewerID, staleRun)
+	if got.Delivered || got.SuppressStatusNotification {
+		t.Fatalf("stale review dispatch = %+v, want no delivery", got)
+	}
+	if count := dbfx.Count(t, `
+		SELECT count(*) FROM chat_message
+		WHERE chat_session_id = $1 AND message_kind = 'review_result'`, sessionID); count != 0 {
+		t.Fatalf("review_result rows written by a stale run = %d, want 0", count)
+	}
+
+	h.dispatchReviewResult(ctx, prevIssue, issue, "agent", reviewerID, nil)
 	if count := dbfx.Count(t, `
 		SELECT count(*) FROM chat_message
 		WHERE chat_session_id = $1 AND message_kind = 'review_result'`, sessionID); count != 1 {

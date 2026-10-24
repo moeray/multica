@@ -1054,11 +1054,19 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	// Timeline entries are written with the rule's changes and published only
 	// once they commit.
 	var activities []wakeupActivity
+	var supersededForBroadcast []db.AgentTaskQueue
 	commit := func() error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
 		s.publishWakeupActivities(activities...)
+		for _, cancelled := range supersededForBroadcast {
+			s.Tasks.captureTaskCancelled(ctx, cancelled)
+			if s.Tasks.Bus != nil {
+				s.Tasks.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, cancelled)
+				s.Tasks.ReconcileAgentStatus(ctx, cancelled.AgentID)
+			}
+		}
 		return nil
 	}
 	note := func(action string, details map[string]any) error {
@@ -1317,8 +1325,56 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		}
 	}
 	noteText, evidence := mergeWakeupEvidence(w, task, receipts)
+	reviewKey, isReviewRequest := ReviewTaskKey(issue, w.AgentID)
+	reviewMerged := false
 	if taskExists {
 		task, err = q.ReplaceWakeupEvidence(ctx, db.ReplaceWakeupEvidenceParams{ID: task.ID, HandoffNote: pgtype.Text{String: noteText, Valid: true}, WakeupEvidence: evidence})
+	} else if isReviewRequest {
+		if err = guardIssueNotInTriage(ctx, q, issue.ID, OriginNamed); err != nil {
+			return err
+		}
+		// Retire an older round before this one contends for the key. The
+		// updates share this transaction; broadcast happens after commit.
+		cancelled, _, supersedeErr := s.Tasks.supersedeStaleReviewTasksWithQueries(ctx, q, issue.ID, w.AgentID, reviewKey)
+		if supersedeErr != nil {
+			return supersedeErr
+		}
+		if len(cancelled) > 0 {
+			if err = SettleTerminalTaskState(ctx, q, cancelled...); err != nil {
+				return err
+			}
+			supersededForBroadcast = append(supersededForBroadcast, cancelled...)
+		}
+		contextJSON, _ := json.Marshal(map[string]any{"wakeup_id": util.UUIDToString(w.ID), "wakeup_revision": w.Revision, "wakeup_evidence": evidence, "wakeup_chain": chain})
+		result, reviewErr := s.Tasks.RequestReviewTx(ctx, q, issue, w.AgentID, func(ctx context.Context, key string) (db.AgentTaskQueue, error) {
+			return q.CreateWakeupTask(ctx, db.CreateWakeupTaskParams{ID: dbid.NewV7(), AgentID: w.AgentID, RuntimeID: agent.RuntimeID, IssueID: w.IssueID, Priority: priorityToInt(issue.Priority), TriggerCommentID: w.ParentCommentID, TriggerSummary: pgtype.Text{String: "Wakeup: " + truncateForSummary(w.Instruction, 160), Valid: true}, HandoffNote: pgtype.Text{String: noteText, Valid: true}, OriginatorUserID: w.CreatedBy, AccountableUserID: w.CreatedBy, OriginatorSource: pgtype.Text{String: "trigger_owner", Valid: true}, TriggerEvidenceKind: pgtype.Text{String: "issue_wakeup", Valid: true}, TriggerEvidenceRefID: w.ID, DelegatedFromTaskID: w.SourceTaskID, WakeupContext: contextJSON, RuntimeMcpOverlay: overlay.Overlay, RuntimeConnectedApps: overlay.ConnectedApps, DedupeKey: pgtype.Text{String: key, Valid: true}})
+		})
+		if reviewErr != nil {
+			return reviewErr
+		}
+		task = result.Task
+		if result.Existing {
+			reviewMerged = true
+			// A queued winner is still mutable, so the wakeup fact can enrich
+			// it. A claimed or running prompt is immutable; the receipt still
+			// records that this wakeup was absorbed by that run.
+			if task.Status == "queued" {
+				updated, updateErr := q.ReplaceWakeupEvidence(ctx, db.ReplaceWakeupEvidenceParams{ID: task.ID, HandoffNote: pgtype.Text{String: noteText, Valid: true}, WakeupEvidence: evidence})
+				if updateErr != nil && !errors.Is(updateErr, pgx.ErrNoRows) {
+					return updateErr
+				}
+				if updateErr == nil {
+					task = updated
+				}
+			}
+			slog.Info("wakeup review request merged into an existing run",
+				"issue_id", util.UUIDToString(issue.ID),
+				"agent_id", util.UUIDToString(w.AgentID),
+				"wakeup_id", util.UUIDToString(w.ID),
+				"task_id", util.UUIDToString(task.ID),
+				"review_key", reviewKey,
+			)
+		}
 	} else {
 		if err = guardIssueNotInTriage(ctx, q, issue.ID, OriginNamed); err != nil {
 			return err
@@ -1347,7 +1403,11 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		// Schedules speak for themselves in the run list; triggers from events,
 		// conditions, a single time or a person get a timeline entry.
 		if w.Kind != "every" && w.Kind != "cron" {
-			if err = note(wakeupActivityTriggered, wakeupTriggerDetails(task, receipts)); err != nil {
+			details := wakeupTriggerDetails(task, receipts)
+			if reviewMerged {
+				details["outcome"] = wakeupOutcomeMerged
+			}
+			if err = note(wakeupActivityTriggered, details); err != nil {
 				return err
 			}
 		}
@@ -1363,6 +1423,9 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	}
 	if err = commit(); err != nil {
 		return err
+	}
+	if reviewMerged {
+		return nil
 	}
 	s.Tasks.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.Tasks.NotifyTaskEnqueued(ctx, task)
