@@ -1355,10 +1355,11 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		task = result.Task
 		if result.Existing {
 			reviewMerged = true
-			// A queued winner is still mutable, so the wakeup fact can enrich
-			// it. A claimed or running prompt is immutable; the receipt still
-			// records that this wakeup was absorbed by that run.
-			if task.Status == "queued" {
+			// A queued winner and a deferred review retry are still mutable,
+			// so the wakeup fact can enrich their prompt. A claimed or running
+			// prompt is immutable; the receipt still records that this wakeup
+			// was absorbed by that run.
+			if task.Status == "queued" || task.Status == "deferred" {
 				updated, updateErr := q.ReplaceWakeupEvidence(ctx, db.ReplaceWakeupEvidenceParams{ID: task.ID, HandoffNote: pgtype.Text{String: noteText, Valid: true}, WakeupEvidence: evidence})
 				if updateErr != nil && !errors.Is(updateErr, pgx.ErrNoRows) {
 					return updateErr

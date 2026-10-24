@@ -243,3 +243,145 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 		t.Fatalf("dedupe_key column survived rollback")
 	}
 }
+
+// TestReviewTaskDedupeMigrationBackfillsPre599DeferredRetry starts from the
+// pre-599 schema shape: a runtime_offline retry is already deferred and has no
+// key. 600 skips it, so 602 must assign the current round key before the v2
+// index is built, and RequestReview's lookup predicate must find it.
+func TestReviewTaskDedupeMigrationBackfillsPre599DeferredRetry(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("integration test requires Postgres at DATABASE_URL")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect to Postgres: %v", err)
+	}
+	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	defer conn.Release()
+
+	const schema = "review_task_dedupe_pre599_test"
+	cleanup := func() {
+		_, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT set_config('search_path', $1, false)`, schema); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+		CREATE TABLE issue (
+			id UUID PRIMARY KEY,
+			status TEXT NOT NULL,
+			assignee_id UUID
+		);
+		CREATE TABLE agent_task_queue (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			agent_id UUID NOT NULL,
+			issue_id UUID NOT NULL,
+			status TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			completed_at TIMESTAMPTZ,
+			fire_at TIMESTAMPTZ,
+			failure_reason TEXT,
+			context JSONB,
+			workflow_step TEXT,
+			trigger_evidence_kind TEXT,
+			trigger_comment_id UUID,
+			comment_thread_id UUID
+		);
+	`); err != nil {
+		t.Fatalf("create pre-599 tables: %v", err)
+	}
+
+	const issueID = "33333333-3333-3333-3333-333333333333"
+	const developerID = "44444444-4444-4444-4444-444444444444"
+	const reviewerID = "55555555-5555-5555-5555-555555555555"
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO issue (id, status, assignee_id)
+		VALUES ($1, 'in_review', $2)
+	`, issueID, developerID); err != nil {
+		t.Fatalf("insert pre-599 issue: %v", err)
+	}
+	var deferredID string
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO agent_task_queue
+			(agent_id, issue_id, status, workflow_step, trigger_evidence_kind, fire_at, context)
+		VALUES ($1, $2, 'deferred', 'in_review', 'issue_wakeup', now() + interval '10 minutes', '{}')
+		RETURNING id::text
+	`, reviewerID, issueID).Scan(&deferredID); err != nil {
+		t.Fatalf("insert pre-599 deferred retry: %v", err)
+	}
+
+	applyMigrationFile(t, ctx, conn.Conn(), "599_review_task_dedupe_schema.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "600_review_task_dedupe_backfill.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "601_agent_task_review_dedupe_key_index.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "602_review_task_deferred_retry_cleanup.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "603_agent_task_review_dedupe_key_index_v2.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "604_drop_agent_task_review_dedupe_key_v1.up.sql")
+
+	expectedKey := "review:" + issueID + ":" + reviewerID + ":0"
+	var key, status string
+	if err := conn.QueryRow(ctx, `
+		SELECT COALESCE(dedupe_key, ''), status
+		FROM agent_task_queue WHERE id = $1::uuid
+	`, deferredID).Scan(&key, &status); err != nil {
+		t.Fatalf("load backfilled deferred retry: %v", err)
+	}
+	if key != expectedKey || status != "deferred" {
+		t.Fatalf("deferred retry = key %q status %q, want %q/deferred", key, status, expectedKey)
+	}
+	var lookedUp string
+	if err := conn.QueryRow(ctx, `
+		SELECT id::text FROM agent_task_queue
+		WHERE dedupe_key = $1
+		  AND status IN ('queued', 'deferred', 'dispatched', 'running', 'waiting_local_directory')
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, expectedKey).Scan(&lookedUp); err != nil {
+		t.Fatalf("look up deferred review by key: %v", err)
+	}
+	if lookedUp != deferredID {
+		t.Fatalf("lookup returned %s, want pre-599 deferred retry %s", lookedUp, deferredID)
+	}
+	var keyedIndexes int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		WHERE schemaname = $1 AND indexname = 'idx_agent_task_queue_review_dedupe_key_v2'
+	`, schema).Scan(&keyedIndexes); err != nil {
+		t.Fatalf("check v2 index: %v", err)
+	}
+	if keyedIndexes != 1 {
+		t.Fatalf("v2 review index count = %d, want 1", keyedIndexes)
+	}
+	if _, err := conn.Exec(ctx, `
+		UPDATE agent_task_queue SET status = 'queued', fire_at = NULL WHERE id = $1::uuid
+	`, deferredID); err != nil {
+		t.Fatalf("promote pre-599 deferred retry: %v", err)
+	}
+	var live int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE dedupe_key = $1
+		  AND status IN ('queued', 'deferred', 'dispatched', 'running', 'waiting_local_directory')
+	`, expectedKey).Scan(&live); err != nil {
+		t.Fatalf("count live review tasks: %v", err)
+	}
+	if live != 1 {
+		t.Fatalf("live review tasks after promotion = %d, want 1", live)
+	}
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, dedupe_key)
+		VALUES ($1, $2, 'queued', $3)
+	`, reviewerID, issueID, expectedKey); !isUniqueViolation(err) {
+		t.Fatalf("duplicate promoted review key: got %v, want unique violation", err)
+	}
+}

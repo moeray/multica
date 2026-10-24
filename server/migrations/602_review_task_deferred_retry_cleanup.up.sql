@@ -3,6 +3,24 @@
 -- a deferred retry beside the queued task RequestReview created because it did
 -- not see deferred rows. Retire the losers before the index is built.
 --
+-- A pre-599 runtime_offline retry has no key yet, and 600 skipped deferred
+-- rows. Backfill the same review shape 600 used so the lookup and cleanup
+-- below can see it.
+UPDATE agent_task_queue t
+SET dedupe_key = 'review:' || t.issue_id::text || ':' || t.agent_id::text || ':' || i.review_generation::text
+FROM issue i
+WHERE t.issue_id = i.id
+  AND t.status = 'deferred'
+  AND t.dedupe_key IS NULL
+  AND i.status = 'in_review'
+  AND t.workflow_step = 'in_review'
+  AND t.agent_id IS NOT NULL
+  AND t.agent_id IS DISTINCT FROM i.assignee_id
+  AND (
+      t.trigger_evidence_kind = 'issue_wakeup'
+      OR (t.trigger_comment_id IS NOT NULL AND t.comment_thread_id IS NOT NULL)
+  );
+
 -- A started task is never cancelled: clear its key and mark it superseded so
 -- the review-result guard refuses its verdict. Unstarted duplicates are
 -- cancelled and keep their terminal key for audit.

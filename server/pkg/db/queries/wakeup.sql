@@ -219,7 +219,9 @@ RETURNING *;
 SELECT * FROM issue_wakeup WHERE id= @id;
 
 -- name: ReplaceWakeupEvidence :one
-UPDATE agent_task_queue SET handoff_note=sqlc.narg(handoff_note), context=COALESCE(context,'{}'::jsonb) || jsonb_build_object('wakeup_evidence', @wakeup_evidence::jsonb) WHERE id= @id AND status='queued' RETURNING *;
+-- A queued task has not built its prompt yet; a deferred review retry is also
+-- still mutable and must carry the wakeup instruction once promoted.
+UPDATE agent_task_queue SET handoff_note=sqlc.narg(handoff_note), context=COALESCE(context,'{}'::jsonb) || jsonb_build_object('wakeup_evidence', @wakeup_evidence::jsonb) WHERE id= @id AND (status='queued' OR (status='deferred' AND dedupe_key IS NOT NULL)) RETURNING *;
 -- name: NoteWakeupFailure :exec
 UPDATE issue_wakeup SET last_error=sqlc.narg(last_error),updated_at=clock_timestamp() WHERE id= @id;
 -- name: TouchWakeupDispatch :exec

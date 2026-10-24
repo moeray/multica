@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,5 +157,32 @@ func TestIssueWakeupReviewMergesIntoDeferredRetry(t *testing.T) {
 	}
 	if receiptTask != retry.ID {
 		t.Fatalf("receipt task = %v, want deferred retry %v", receiptTask, retry.ID)
+	}
+	var handoff pgtype.Text
+	var contextRaw []byte
+	if err := f.Pool.QueryRow(ctx, `
+		SELECT handoff_note, context FROM agent_task_queue WHERE id = $1
+	`, retry.ID).Scan(&handoff, &contextRaw); err != nil {
+		t.Fatalf("load deferred retry prompt: %v", err)
+	}
+	if !handoff.Valid || !strings.Contains(handoff.String, "Review the handoff") {
+		t.Fatalf("deferred retry handoff_note = %q, want the wakeup instruction", handoff.String)
+	}
+	var stored struct {
+		Evidence struct {
+			Instruction string `json:"instruction"`
+			Facts       []struct {
+				EventType string `json:"event_type"`
+			} `json:"facts"`
+		} `json:"wakeup_evidence"`
+	}
+	if err := json.Unmarshal(contextRaw, &stored); err != nil {
+		t.Fatalf("decode deferred retry context: %v", err)
+	}
+	if stored.Evidence.Instruction != "Review the handoff" {
+		t.Fatalf("deferred retry evidence instruction = %q, want Review the handoff", stored.Evidence.Instruction)
+	}
+	if len(stored.Evidence.Facts) == 0 || stored.Evidence.Facts[0].EventType != "issue.status_changed" {
+		t.Fatalf("deferred retry evidence facts = %+v, want issue.status_changed", stored.Evidence.Facts)
 	}
 }
