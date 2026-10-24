@@ -3210,7 +3210,10 @@ func releaseChatContextStamp(ctx context.Context, qtx *db.Queries, task db.Agent
 	if !task.ChatSessionID.Valid || task.DispatchedAt.Valid {
 		return nil
 	}
-	if err := qtx.ReleaseChatContextMessagesFromTask(ctx, task.ID); err != nil {
+	if err := qtx.ReleaseChatContextMessagesFromTask(ctx, db.ReleaseChatContextMessagesFromTaskParams{
+		ChatSessionID: task.ChatSessionID,
+		TaskID:        task.ID,
+	}); err != nil {
 		return fmt.Errorf("release cancelled chat context messages: %w", err)
 	}
 	return nil

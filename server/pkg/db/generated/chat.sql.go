@@ -3582,8 +3582,14 @@ func (q *Queries) ReanchorNextQueuedDirectChatInput(ctx context.Context, arg Rea
 const releaseChatContextMessagesFromTask = `-- name: ReleaseChatContextMessagesFromTask :exec
 UPDATE chat_message
 SET context_task_id = NULL
-WHERE context_task_id = $1
+WHERE chat_session_id = $1
+  AND context_task_id = $2
 `
+
+type ReleaseChatContextMessagesFromTaskParams struct {
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	TaskID        pgtype.UUID `json:"task_id"`
+}
 
 // A turn cancelled BEFORE it was claimed never read the mirrored rows stamped
 // to it at enqueue, so leaving the stamp would hide them from every later turn
@@ -3593,8 +3599,12 @@ WHERE context_task_id = $1
 // The caller owns the decision of WHETHER to release: only a never-dispatched
 // task qualifies. A claimed turn already built its prompt from these rows, and
 // dropping its stamp would inject them again next turn.
-func (q *Queries) ReleaseChatContextMessagesFromTask(ctx context.Context, taskID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, releaseChatContextMessagesFromTask, taskID)
+//
+// The session id is redundant to the answer (a task id belongs to one session)
+// but leads idx_chat_message_context_task, so the lookup stays an index probe;
+// without it PostgreSQL cannot use that index at all.
+func (q *Queries) ReleaseChatContextMessagesFromTask(ctx context.Context, arg ReleaseChatContextMessagesFromTaskParams) error {
+	_, err := q.db.Exec(ctx, releaseChatContextMessagesFromTask, arg.ChatSessionID, arg.TaskID)
 	return err
 }
 

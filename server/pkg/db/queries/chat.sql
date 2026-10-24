@@ -760,9 +760,14 @@ WHERE context_task_id = @parent_task_id;
 -- The caller owns the decision of WHETHER to release: only a never-dispatched
 -- task qualifies. A claimed turn already built its prompt from these rows, and
 -- dropping its stamp would inject them again next turn.
+--
+-- The session id is redundant to the answer (a task id belongs to one session)
+-- but leads idx_chat_message_context_task, so the lookup stays an index probe;
+-- without it PostgreSQL cannot use that index at all.
 UPDATE chat_message
 SET context_task_id = NULL
-WHERE context_task_id = @task_id;
+WHERE chat_session_id = @chat_session_id
+  AND context_task_id = @task_id;
 
 -- name: ListChatContextMessagesForTask :many
 -- The mirrored rows this turn must read, in transcript order. Keyed by the
