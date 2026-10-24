@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -59,8 +60,8 @@ func TestIssueWakeupReviewMergesIntoMentionTask(t *testing.T) {
 
 	wakeDispatch(t, s, w)
 
-	if n := f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND dedupe_key = $2`, issueID, key); n != 1 {
-		t.Fatalf("tasks holding the review key = %d, want 1", n)
+	if n := f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND dedupe_key = $2 AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')`, issueID, key); n != 1 {
+		t.Fatalf("live tasks holding the review key = %d, want 1", n)
 	}
 	if n := f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued','dispatched','running','waiting_local_directory')`, issueID, reviewerID); n != 1 {
 		t.Fatalf("active review tasks = %d, want 1", n)
@@ -78,5 +79,82 @@ func TestIssueWakeupReviewMergesIntoMentionTask(t *testing.T) {
 	}
 	if receiptTask != mention.ID {
 		t.Fatalf("receipt task = %v, want the merged mention task %v", receiptTask, mention.ID)
+	}
+}
+
+// TestIssueWakeupReviewMergesIntoDeferredRetry covers the wakeup side of a
+// runtime_offline retry: the deferred child holds the round key, so the wakeup
+// must consume its input against that row without enqueueing a second review.
+func TestIssueWakeupReviewMergesIntoDeferredRetry(t *testing.T) {
+	f, s, issueID, reviewer := wakeFixture(t)
+	ctx := context.Background()
+	developer := f.privateAgentOwnedBy(t, f.UserID, "wakeup-deferred-dev")
+	f.Exec(t, `UPDATE issue SET status = 'in_review', assignee_type = 'agent', assignee_id = $2 WHERE id = $1`, issueID, developer)
+	issue, err := f.q.GetIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("load issue: %v", err)
+	}
+	reviewerID := parseTestUUID(t, reviewer)
+	key, ok := ReviewTaskKey(issue, reviewerID)
+	if !ok {
+		t.Fatal("expected a review key")
+	}
+	first, err := f.svc.TaskSvc.EnqueueMentionTaskForReview(ctx, issue, reviewerID, pgtype.UUID{}, OriginNamed, key)
+	if err != nil {
+		t.Fatalf("enqueue review: %v", err)
+	}
+	f.Exec(t, `UPDATE agent_task_queue SET status = 'failed', completed_at = now(), failure_reason = 'runtime_offline' WHERE id = $1`, first.ID)
+	retry, err := f.q.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+		ID:        first.ID,
+		NewTaskID: dbid.NewV7(),
+		FireAt:    pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create deferred retry: %v", err)
+	}
+	if retry.Status != "deferred" || retry.DedupeKey != first.DedupeKey {
+		t.Fatalf("retry = status %q key %v, want deferred/%v", retry.Status, retry.DedupeKey, first.DedupeKey)
+	}
+
+	w := wakeCreate(t, f, s, issueID, WakeupInput{
+		AgentID:     reviewer,
+		Kind:        "event",
+		Mode:        "once",
+		EventTypes:  []string{"issue.status_changed"},
+		Instruction: "Review the handoff",
+	})
+	payload, _ := json.Marshal(map[string]any{"status": "in_review"})
+	receipt, err := f.q.RecordWakeupReceipt(ctx, db.RecordWakeupReceiptParams{
+		ID:        dbid.NewV7(),
+		WakeupID:  w.ID,
+		Revision:  w.Revision,
+		EventKey:  "status:in_review",
+		EventType: "issue.status_changed",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("record wakeup receipt: %v", err)
+	}
+	wakeDispatch(t, s, w)
+
+	if n := f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND dedupe_key = $2 AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')`, issueID, key); n != 1 {
+		t.Fatalf("live tasks holding the review key = %d, want 1", n)
+	}
+	if n := f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')`, issueID, reviewerID); n != 1 {
+		t.Fatalf("live review tasks = %d, want 1", n)
+	}
+	got, err := f.q.GetIssueWakeup(ctx, db.GetIssueWakeupParams{ID: w.ID, WorkspaceID: w.WorkspaceID})
+	if err != nil {
+		t.Fatalf("reload wakeup: %v", err)
+	}
+	if !got.LastTaskID.Valid || got.LastTaskID != retry.ID {
+		t.Fatalf("wakeup last task = %v, want deferred retry %v", got.LastTaskID, retry.ID)
+	}
+	var receiptTask pgtype.UUID
+	if err := f.Pool.QueryRow(ctx, `SELECT task_id FROM issue_wakeup_receipt WHERE id = $1`, receipt.ID).Scan(&receiptTask); err != nil {
+		t.Fatalf("load receipt: %v", err)
+	}
+	if receiptTask != retry.ID {
+		t.Fatalf("receipt task = %v, want deferred retry %v", receiptTask, retry.ID)
 	}
 }

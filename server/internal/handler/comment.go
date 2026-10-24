@@ -2255,12 +2255,26 @@ func (h *Handler) resolveReviewCommentEnqueue(ctx context.Context, issue db.Issu
 
 	// A review task covers the whole issue/round, so the head-scoped merge is
 	// intentionally bypassed: the dedupe key is the round identity.
-	if result.Task.Status == "queued" {
+	if result.Task.Status == "queued" || result.Task.Status == "deferred" {
 		switch h.mergeCommentIntoPendingTaskForReview(ctx, issue, trigger, triggerCommentID, pgtype.Text{}, reviewKey) {
 		case commentMergeSucceeded:
 			return DispatchCoalesced, ReasonCoalesced
 		case commentMergeAttributionBlocked:
 			return DispatchBlocked, ReasonAttributionBlocked
+		case commentMergeNoPendingTask:
+			// The retry may have been promoted and claimed between the lookup
+			// and the merge. Re-read before choosing the active-task path so
+			// the comment is still registered as planned input.
+			refreshed, refreshErr := h.Queries.GetAgentTask(ctx, result.Task.ID)
+			if refreshErr != nil {
+				slog.Warn("review comment: refresh task after merge miss failed",
+					"issue_id", uuidToString(issue.ID),
+					"agent_id", uuidToString(trigger.Agent.ID),
+					"task_id", uuidToString(result.Task.ID),
+					"error", refreshErr)
+				return DispatchBlocked, ReasonInternalError
+			}
+			result.Task = refreshed
 		case commentMergeError:
 			return DispatchBlocked, ReasonInternalError
 		}

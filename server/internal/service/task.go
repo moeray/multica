@@ -1518,8 +1518,12 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlanAndDedupe(ctx context.Con
 			slog.Debug("mention task enqueue coalesced: pending task already exists", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
 			return db.AgentTaskQueue{}, ErrDuplicatePendingTask
 		}
-		// A review insert that hit its dedupe key returns no row. Keep the raw
-		// sentinel so RequestReview can resolve the winning task.
+		if dedupeKey != "" && isReviewDedupeKeyConflict(err) {
+			// Let RequestReview resolve the task that won the round key.
+			return db.AgentTaskQueue{}, err
+		}
+		// A fenced insert (workspace torn down) returns no row. Keep the raw
+		// sentinel so RequestReview can verify no winner exists and fail.
 		if dedupeKey != "" && errors.Is(err, pgx.ErrNoRows) {
 			return db.AgentTaskQueue{}, err
 		}

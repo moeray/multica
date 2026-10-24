@@ -213,9 +213,6 @@ SELECT
     sqlc.narg('dedupe_key'),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 WHERE lock_task_owner_rows($1, $3, $2)
-ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
-DO NOTHING
 RETURNING *;
 
 -- name: LocklessWakeup :one

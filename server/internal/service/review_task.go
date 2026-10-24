@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -147,7 +148,8 @@ func (s *TaskService) requestReviewWithQueries(ctx context.Context, q *db.Querie
 		// A concurrent trigger won the key, or an older task still occupies the
 		// ordinary pending slot for this thread. In the former case the winner
 		// is exactly the task this request should return.
-		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrDuplicatePendingTask) {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrDuplicatePendingTask) ||
+			isReviewDedupeKeyConflict(err) || isDuplicatePendingTaskErr(err) {
 			winner, lookupErr := q.GetActiveReviewTaskByDedupeKey(ctx, keyText)
 			if lookupErr == nil {
 				slog.Info("review request lost the race and merged into the winner",
@@ -161,6 +163,9 @@ func (s *TaskService) requestReviewWithQueries(ctx context.Context, q *db.Querie
 			if !errors.Is(lookupErr, pgx.ErrNoRows) {
 				return ReviewTaskResult{}, fmt.Errorf("look up review task after conflict: %w", lookupErr)
 			}
+			if errors.Is(err, ErrDuplicatePendingTask) || isDuplicatePendingTaskErr(err) {
+				return ReviewTaskResult{}, ErrDuplicatePendingTask
+			}
 		}
 		return ReviewTaskResult{}, err
 	}
@@ -173,6 +178,22 @@ func (s *TaskService) requestReviewWithQueries(ctx context.Context, q *db.Querie
 		"task_id", util.UUIDToString(task.ID),
 	)
 	return ReviewTaskResult{Key: key, Task: task}, nil
+}
+
+// isReviewDedupeKeyConflict reports whether an insert lost the race for the
+// review round key. Both the v1 and v2 partial indexes are accepted while a
+// rolling deploy can have either one in place.
+func isReviewDedupeKeyConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		return false
+	}
+	switch pgErr.ConstraintName {
+	case "idx_agent_task_queue_review_dedupe_key", "idx_agent_task_queue_review_dedupe_key_v2":
+		return true
+	default:
+		return false
+	}
 }
 
 // SupersedeStaleReviewTasks retires work from an older review round before a

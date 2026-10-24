@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -73,7 +74,9 @@ func TestCreateCommentReviewMentionFoldsIntoRunningRound(t *testing.T) {
 
 	var taskCount int
 	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2
+		SELECT count(*) FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		  AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')
 	`, issueID, reviewerID).Scan(&taskCount); err != nil {
 		t.Fatalf("count review tasks: %v", err)
 	}
@@ -175,7 +178,9 @@ func TestCreateCommentReviewMentionMergesIntoWakeupTask(t *testing.T) {
 	}
 	var taskCount int
 	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2
+		SELECT count(*) FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		  AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')
 	`, issueID, reviewerID).Scan(&taskCount); err != nil {
 		t.Fatalf("count review tasks: %v", err)
 	}
@@ -232,5 +237,91 @@ func TestCreateCommentReviewFailsClosedWhenSupersedeFails(t *testing.T) {
 	}
 	if taskCount != 0 {
 		t.Fatalf("review tasks after failed supersede = %d, want 0", taskCount)
+	}
+}
+
+// TestCreateCommentReviewMentionMergesIntoDeferredRetry covers the
+// runtime_offline auto-retry: the deferred child holds the round key, so the
+// delivery mention folds into it instead of creating a second review. Promotion
+// then keeps the same row and a later mention still coalesces.
+func TestCreateCommentReviewMentionMergesIntoDeferredRetry(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	developerID := createHandlerTestAgent(t, "Deferred Review Developer", nil)
+	reviewerID := createHandlerTestAgent(t, "Deferred Review Reviewer", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "deferred review", "agent", developerID)
+	if _, err := testPool.Exec(ctx, `UPDATE issue SET status = 'in_review' WHERE id = $1`, issueID); err != nil {
+		t.Fatalf("move issue to review: %v", err)
+	}
+	issue, err := testHandler.Queries.GetIssue(ctx, parseUUID(issueID))
+	if err != nil {
+		t.Fatalf("load issue: %v", err)
+	}
+	reviewerUUID := parseUUID(reviewerID)
+	first, err := testHandler.TaskService.RequestReview(ctx, issue, reviewerUUID, func(ctx context.Context, key string) (db.AgentTaskQueue, error) {
+		return testHandler.TaskService.EnqueueMentionTaskForReview(ctx, issue, reviewerUUID, pgtype.UUID{}, service.OriginNamed, key)
+	})
+	if err != nil {
+		t.Fatalf("initial review: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE agent_task_queue SET status = 'failed', completed_at = now(), failure_reason = 'runtime_offline'
+		WHERE id = $1
+	`, first.Task.ID); err != nil {
+		t.Fatalf("fail review: %v", err)
+	}
+	retry, err := testHandler.Queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+		ID:        first.Task.ID,
+		NewTaskID: dbid.NewV7(),
+		FireAt:    pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create deferred retry: %v", err)
+	}
+
+	content := fmt.Sprintf("[@Reviewer](mention://agent/%s) please review", reviewerID)
+	commentID := postCommentForTriggerPreviewTest(t, issueID, map[string]any{"content": content})
+	var folded int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE id = $1
+		  AND (trigger_comment_id = $2 OR $2::uuid = ANY(coalesced_comment_ids))
+	`, retry.ID, commentID).Scan(&folded); err != nil {
+		t.Fatalf("check deferred merge: %v", err)
+	}
+	if folded != 1 {
+		t.Fatal("mention was not folded into the deferred review retry")
+	}
+	var taskCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		  AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')
+	`, issueID, reviewerID).Scan(&taskCount); err != nil {
+		t.Fatalf("count review tasks: %v", err)
+	}
+	if taskCount != 1 {
+		t.Fatalf("review tasks = %d, want only the deferred retry", taskCount)
+	}
+
+	promoted, err := testHandler.Queries.PromoteDeferredChannelIssueTask(ctx, retry.ID)
+	if err != nil {
+		t.Fatalf("promote deferred retry: %v", err)
+	}
+	if promoted.Status != "queued" {
+		t.Fatalf("promoted retry status = %q, want queued", promoted.Status)
+	}
+	postCommentForTriggerPreviewTest(t, issueID, map[string]any{"content": content + " after promotion"})
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		  AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')
+	`, issueID, reviewerID).Scan(&taskCount); err != nil {
+		t.Fatalf("count post-promotion review tasks: %v", err)
+	}
+	if taskCount != 1 {
+		t.Fatalf("post-promotion review tasks = %d, want 1", taskCount)
 	}
 }

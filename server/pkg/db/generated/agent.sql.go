@@ -2422,9 +2422,6 @@ SELECT
     $23,
     COALESCE($24::uuid, gen_random_uuid())
 WHERE lock_task_owner_rows($1, $3, $2)
-ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
-DO NOTHING
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, dedupe_key
 `
 
@@ -2473,10 +2470,6 @@ type CreateAgentTaskParams struct {
 // COALESCE keeps the column's gen_random_uuid() default reachable, so a caller
 // that passes no id still inserts — it just gets a random v4, exactly as before.
 // The same pattern is used by every INSERT listed in pkg/dbid's write table.
-// Review requests (MP-67) are idempotent per (issue, reviewer, round). The
-// partial unique index only covers active rows, so a terminal task releases
-// the key and a retry can enter. Other unique indexes still raise, preserving
-// the pending-task race handling in the service layer.
 func (q *Queries) CreateAgentTask(ctx context.Context, arg CreateAgentTaskParams) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, createAgentTask,
 		arg.AgentID,
@@ -3934,14 +3927,15 @@ func (q *Queries) FailStaleTasks(ctx context.Context, arg FailStaleTasksParams) 
 const getActiveReviewTaskByDedupeKey = `-- name: GetActiveReviewTaskByDedupeKey :one
 SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, dedupe_key FROM agent_task_queue
 WHERE dedupe_key = $1
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  AND status IN ('queued', 'deferred', 'dispatched', 'running', 'waiting_local_directory')
 ORDER BY created_at DESC, id DESC
 LIMIT 1
 `
 
-// The single live task for a review round. The partial unique index guarantees
-// at most one row; the ordering only makes the result deterministic while a
-// stale build exists during a rolling deploy.
+// The single live task for a review round. deferred auto-retries hold the key
+// until they are promoted and run, so they count as live. The partial unique
+// index guarantees at most one row; the ordering only makes the result
+// deterministic while a stale build exists during a rolling deploy.
 func (q *Queries) GetActiveReviewTaskByDedupeKey(ctx context.Context, dedupeKey pgtype.Text) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, getActiveReviewTaskByDedupeKey, dedupeKey)
 	var i AgentTaskQueue
@@ -7271,7 +7265,16 @@ WHERE id = (
       )
       AND (
           t.status = 'queued'
-          OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
+          OR (
+              t.status = 'deferred'
+              AND (
+                  t.context->>'channel_issue_media_pending' = 'true'
+                  OR (
+                      $12::text IS NOT NULL
+                      AND t.dedupe_key = $12::text
+                  )
+              )
+          )
       )
       -- Head-scoped (TEN-356, #5914): never fold across HEADs. The physical
       -- unique index is per (issue_id, agent_id, thread), so an insert-race loser can

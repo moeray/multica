@@ -350,13 +350,6 @@ SELECT
     sqlc.narg('dedupe_key'),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 WHERE lock_task_owner_rows($1, $3, $2)
--- Review requests (MP-67) are idempotent per (issue, reviewer, round). The
--- partial unique index only covers active rows, so a terminal task releases
--- the key and a retry can enter. Other unique indexes still raise, preserving
--- the pending-task race handling in the service layer.
-ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
-DO NOTHING
 RETURNING *;
 
 -- name: CreateDeferredChannelIssueTask :one
@@ -1697,12 +1690,13 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid);
 
 -- name: GetActiveReviewTaskByDedupeKey :one
--- The single live task for a review round. The partial unique index guarantees
--- at most one row; the ordering only makes the result deterministic while a
--- stale build exists during a rolling deploy.
+-- The single live task for a review round. deferred auto-retries hold the key
+-- until they are promoted and run, so they count as live. The partial unique
+-- index guarantees at most one row; the ordering only makes the result
+-- deterministic while a stale build exists during a rolling deploy.
 SELECT * FROM agent_task_queue
 WHERE dedupe_key = $1
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  AND status IN ('queued', 'deferred', 'dispatched', 'running', 'waiting_local_directory')
 ORDER BY created_at DESC, id DESC
 LIMIT 1;
 
@@ -1834,7 +1828,16 @@ WHERE id = (
       )
       AND (
           t.status = 'queued'
-          OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
+          OR (
+              t.status = 'deferred'
+              AND (
+                  t.context->>'channel_issue_media_pending' = 'true'
+                  OR (
+                      sqlc.narg('review_dedupe_key')::text IS NOT NULL
+                      AND t.dedupe_key = sqlc.narg('review_dedupe_key')::text
+                  )
+              )
+          )
       )
       -- Head-scoped (TEN-356, #5914): never fold across HEADs. The physical
       -- unique index is per (issue_id, agent_id, thread), so an insert-race loser can

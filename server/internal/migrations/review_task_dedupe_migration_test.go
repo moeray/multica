@@ -55,6 +55,7 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 			status TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			completed_at TIMESTAMPTZ,
+			fire_at TIMESTAMPTZ,
 			failure_reason TEXT,
 			context JSONB,
 			dedupe_key TEXT,
@@ -132,6 +133,81 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 	}
 
 	applyMigrationFile(t, ctx, conn.Conn(), "601_agent_task_review_dedupe_key_index.up.sql")
+	var keyedTaskID string
+	if err := conn.QueryRow(ctx, `SELECT id::text FROM agent_task_queue WHERE dedupe_key = $1`, expectedKey).Scan(&keyedTaskID); err != nil {
+		t.Fatalf("load keyed review task: %v", err)
+	}
+	// Previous release shape: a deferred retry and a queued review task share
+	// one key because RequestReview could not see the deferred row. v1 does not
+	// cover deferred, so both are allowed until the cleanup runs.
+	if _, err := conn.Exec(ctx, `
+		UPDATE agent_task_queue
+		SET status = 'deferred', fire_at = now() + interval '10 minutes'
+		WHERE id = $1::uuid
+	`, keyedTaskID); err != nil {
+		t.Fatalf("defer old review task: %v", err)
+	}
+	var queuedTaskID string
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, dedupe_key)
+		VALUES ($1, $2, 'queued', $3)
+		RETURNING id::text
+	`, agentID, issueID, expectedKey).Scan(&queuedTaskID); err != nil {
+		t.Fatalf("seed dirty deferred/queued pair: %v", err)
+	}
+	applyMigrationFile(t, ctx, conn.Conn(), "602_review_task_deferred_retry_cleanup.up.sql")
+	var live, cancelledDuplicates int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE dedupe_key = $1
+		  AND status IN ('queued', 'deferred', 'dispatched', 'running', 'waiting_local_directory')
+	`, expectedKey).Scan(&live); err != nil {
+		t.Fatalf("count live keyed tasks after cleanup: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE id = $1::uuid AND status = 'cancelled' AND failure_reason = 'review_superseded'
+	`, keyedTaskID).Scan(&cancelledDuplicates); err != nil {
+		t.Fatalf("check retired deferred retry: %v", err)
+	}
+	if live != 1 || cancelledDuplicates != 1 {
+		t.Fatalf("cleanup live=%d retired=%d, want 1/1", live, cancelledDuplicates)
+	}
+
+	applyMigrationFile(t, ctx, conn.Conn(), "603_agent_task_review_dedupe_key_index_v2.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "604_drop_agent_task_review_dedupe_key_v1.up.sql")
+	var indexes int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		WHERE schemaname = $1
+		  AND indexname IN ('idx_agent_task_queue_review_dedupe_key', 'idx_agent_task_queue_review_dedupe_key_v2')
+	`, schema).Scan(&indexes); err != nil {
+		t.Fatalf("count review indexes: %v", err)
+	}
+	if indexes != 1 {
+		t.Fatalf("review indexes = %d, want only the v2 index", indexes)
+	}
+	// The review is retried after a runtime failure: the child is deferred and
+	// still holds the round key.
+	if _, err := conn.Exec(ctx, `
+		UPDATE agent_task_queue
+		SET status = 'deferred', fire_at = now() + interval '10 minutes'
+		WHERE id = $1::uuid
+	`, queuedTaskID); err != nil {
+		t.Fatalf("defer review task: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, dedupe_key)
+		VALUES ($1, $2, 'deferred', $3)
+	`, agentID, issueID, expectedKey); !isUniqueViolation(err) {
+		t.Fatalf("duplicate deferred review key: got %v, want unique violation", err)
+	}
+	// Promoting the retry keeps the same row and key.
+	if _, err := conn.Exec(ctx, `
+		UPDATE agent_task_queue SET status = 'queued', fire_at = NULL WHERE id = $1::uuid
+	`, queuedTaskID); err != nil {
+		t.Fatalf("promote deferred review task: %v", err)
+	}
 	if _, err := conn.Exec(ctx, `
 		INSERT INTO agent_task_queue (agent_id, issue_id, status, dedupe_key)
 		VALUES ($1, $2, 'queued', $3)
@@ -140,8 +216,8 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 	}
 	// Terminal rows release the partial key.
 	if _, err := conn.Exec(ctx, `
-		UPDATE agent_task_queue SET status = 'completed', completed_at = now() WHERE dedupe_key = $1
-	`, expectedKey); err != nil {
+		UPDATE agent_task_queue SET status = 'completed', completed_at = now() WHERE id = $1::uuid
+	`, queuedTaskID); err != nil {
 		t.Fatalf("complete review task: %v", err)
 	}
 	if _, err := conn.Exec(ctx, `
@@ -151,6 +227,8 @@ func TestReviewTaskDedupeMigration(t *testing.T) {
 		t.Fatalf("reuse key after terminal: %v", err)
 	}
 
+	applyMigrationFile(t, ctx, conn.Conn(), "604_drop_agent_task_review_dedupe_key_v1.down.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "603_agent_task_review_dedupe_key_index_v2.down.sql")
 	applyMigrationFile(t, ctx, conn.Conn(), "601_agent_task_review_dedupe_key_index.down.sql")
 	applyMigrationFile(t, ctx, conn.Conn(), "600_review_task_dedupe_backfill.down.sql")
 	applyMigrationFile(t, ctx, conn.Conn(), "599_review_task_dedupe_schema.down.sql")

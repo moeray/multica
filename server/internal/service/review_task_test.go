@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -266,6 +267,72 @@ func TestCreateRetryTaskPreservesReviewKey(t *testing.T) {
 	}
 	if retry.DedupeKey != first.Task.DedupeKey {
 		t.Fatalf("retry dedupe_key = %v, want %v", retry.DedupeKey, first.Task.DedupeKey)
+	}
+}
+
+// TestRequestReviewSeesDeferredRetry covers the runtime_offline path: the
+// automatic retry is deferred but still holds the round key, so a concurrent
+// mention/wakeup must resolve to that row rather than creating a second queued
+// review. Promotion then keeps the same row.
+func TestRequestReviewSeesDeferredRetry(t *testing.T) {
+	fx := newReviewRoundFixture(t)
+	ctx := context.Background()
+	svc := fx.f.svc.TaskSvc
+
+	first, err := svc.RequestReview(ctx, fx.issue, fx.reviewerA, fx.mentionCreator(t))
+	if err != nil {
+		t.Fatalf("first review: %v", err)
+	}
+	if _, err := fx.f.Pool.Exec(ctx, `
+		UPDATE agent_task_queue SET status = 'failed', completed_at = now(), failure_reason = 'runtime_offline'
+		WHERE id = $1
+	`, first.Task.ID); err != nil {
+		t.Fatalf("fail review: %v", err)
+	}
+	retry, err := fx.f.q.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+		ID:        first.Task.ID,
+		NewTaskID: dbid.NewV7(),
+		FireAt:    pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateRetryTask: %v", err)
+	}
+	if retry.Status != "deferred" || retry.DedupeKey != first.Task.DedupeKey {
+		t.Fatalf("deferred retry = status %q key %v, want deferred/%v", retry.Status, retry.DedupeKey, first.Task.DedupeKey)
+	}
+
+	second, err := svc.RequestReview(ctx, fx.issue, fx.reviewerA, fx.mentionCreator(t))
+	if err != nil {
+		t.Fatalf("review request with deferred retry: %v", err)
+	}
+	if !second.Existing || second.Task.ID != retry.ID {
+		t.Fatalf("review request = existing %v task %v, want deferred retry %v", second.Existing, second.Task.ID, retry.ID)
+	}
+	var live int
+	if err := fx.f.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		  AND status IN ('queued','deferred','dispatched','running','waiting_local_directory')
+	`, fx.issue.ID, fx.reviewerA).Scan(&live); err != nil {
+		t.Fatalf("count live review tasks: %v", err)
+	}
+	if live != 1 {
+		t.Fatalf("live review tasks = %d, want 1", live)
+	}
+
+	promoted, err := fx.f.q.PromoteDeferredChannelIssueTask(ctx, retry.ID)
+	if err != nil {
+		t.Fatalf("promote deferred retry: %v", err)
+	}
+	if promoted.Status != "queued" || promoted.DedupeKey != retry.DedupeKey {
+		t.Fatalf("promoted retry = status %q key %v, want queued/%v", promoted.Status, promoted.DedupeKey, retry.DedupeKey)
+	}
+	third, err := svc.RequestReview(ctx, fx.issue, fx.reviewerA, fx.mentionCreator(t))
+	if err != nil {
+		t.Fatalf("review request after promotion: %v", err)
+	}
+	if !third.Existing || third.Task.ID != retry.ID {
+		t.Fatalf("post-promotion review request = existing %v task %v, want %v", third.Existing, third.Task.ID, retry.ID)
 	}
 }
 
