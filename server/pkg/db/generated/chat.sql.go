@@ -1772,6 +1772,7 @@ WHERE message.chat_session_id = $2
         ON prior_batch.id = COALESCE(prior_turn.chat_input_task_id, prior_turn.id)
       WHERE prior.chat_session_id = $2
         AND prior.role != 'user'
+        AND prior.task_id IS NOT NULL
         AND (prior.created_at, prior.id) > (message.created_at, message.id)
         AND (prior_batch.id IS NULL OR prior_batch.created_at > message.created_at)
   )
@@ -1802,9 +1803,18 @@ type LinkUnownedChannelChatMessagesToTaskParams struct {
 // The reply's turn is compared through COALESCE(chat_input_task_id, id): an
 // auto-retry clone gets a fresh id while inheriting the root's batch, and it is
 // the ROOT's creation time that says which messages that batch could contain.
-// A non-user row with no task (or whose task row is gone) still counts as a
-// boundary — unattributable output is treated as possibly answering, so the
-// pre-ownership rows of a legacy session are never swept into a new batch.
+//
+// A non-user row with NO producing turn (task_id IS NULL) is not an answer and
+// is therefore not a boundary (MP-69). This is the same structural split MP-68
+// uses to decide which rows the next turn must READ: a mirror — a review result
+// written back into the transcript — was authored by the server, answers no
+// batch, and is stamped for the upcoming turn instead. Counting it as a
+// boundary let one land between the user message and the debounce flush and hide
+// that message from the very turn about to read the mirror, which then sealed
+// zero rows and was cancelled for having an empty input batch (GH #6591). Only
+// a row that has a task_id can have answered something; output whose task row is
+// GONE (task_id set, row missing) still counts as a boundary, because
+// unattributable output is treated as possibly answering.
 func (q *Queries) LinkUnownedChannelChatMessagesToTask(ctx context.Context, arg LinkUnownedChannelChatMessagesToTaskParams) error {
 	_, err := q.db.Exec(ctx, linkUnownedChannelChatMessagesToTask, arg.TaskID, arg.ChatSessionID)
 	return err

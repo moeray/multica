@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // appendChannelUserMessage writes an inbound channel message the way
@@ -143,5 +144,71 @@ func TestChannelChat_ReplyLandingInsideDebounceWindowStillAnswersTheNextMessage(
 	}
 	if owner == nil || *owner != uuidToString(next.ID) {
 		t.Fatalf("waiting message task_id = %v, want the new turn %s", owner, uuidToString(next.ID))
+	}
+}
+
+// TestChannelChat_MirrorLandingInsideDebounceWindowStillAnswersTheWaitingMessage
+// is MP-69's regression, end to end: a review result mirrored back into the
+// chat while the member's message is still waiting out the debounce window must
+// not be mistaken for an answer to it.
+//
+//	18:31:17.7  chat_message "刚才那条评审结果还差什么？"  -> task_id NULL
+//	18:31:18.0  review result mirrored into the chat         -> assistant, task_id NULL
+//	18:31:20.7  the debounce fires                           -> task, input seal
+//
+// The mirror has no producing turn, so it cannot have answered anything; MP-68
+// stamps exactly these rows for the turn that is about to read them. Counting it
+// as a boundary sealed zero rows, and the claim then cancelled the task for
+// having an empty input batch — the user's message accepted, a task appearing
+// and vanishing, and no reply (GH #6591).
+func TestChannelChat_MirrorLandingInsideDebounceWindowStillAnswersTheWaitingMessage(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	agentID, sessionID, runtimeID, daemonID := setupDirectChatSession(t, ctx, "channel mirror boundary")
+	seedChannelBindingOfChatType(t, ctx, agentID, sessionID, "wecom", "p2p", "", "")
+
+	const body = "刚才那条评审结果还差什么？"
+	waiting := appendChannelUserMessage(t, ctx, sessionID, body)
+	// The mirror exists before the task does, so the seal runs with it already
+	// in the transcript — the exact ordering of the bug.
+	mirror := seedMirroredReviewResult(t, ctx, sessionID,
+		protocol.BuildReviewResultContent(true, "阻塞项已修复。", "MP-68"))
+
+	next := flushChannelChatRun(t, ctx, sessionID)
+	res := claimTaskRaw(t, runtimeID, daemonID)
+	if res.code != 200 || res.task == nil || res.task.ChatMessage != body {
+		var status string
+		var ownedInput int
+		_ = testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, next.ID).Scan(&status)
+		_ = testPool.QueryRow(ctx, `SELECT count(*) FROM chat_message WHERE task_id = $1 AND role = 'user'`,
+			next.ID).Scan(&ownedInput)
+		t.Fatalf("claim = %d %s (task %+v); task %s owns %d user messages and is now %q. "+
+			"The mirror hid the message and the turn was cancelled as empty.",
+			res.code, res.body, res.task, uuidToString(next.ID), ownedInput, status)
+	}
+
+	var owner *string
+	if err := testPool.QueryRow(ctx, `SELECT task_id::text FROM chat_message WHERE id = $1`, waiting).Scan(&owner); err != nil {
+		t.Fatalf("load the waiting message: %v", err)
+	}
+	if owner == nil || *owner != uuidToString(next.ID) {
+		t.Fatalf("waiting message task_id = %v, want the new turn %s", owner, uuidToString(next.ID))
+	}
+
+	// The mirror is still what MP-68 says it is: context this turn must read,
+	// never input it owns.
+	var mirrorOwner, mirrorContext *string
+	if err := testPool.QueryRow(ctx,
+		`SELECT task_id::text, context_task_id::text FROM chat_message WHERE id = $1`, mirror,
+	).Scan(&mirrorOwner, &mirrorContext); err != nil {
+		t.Fatalf("load the mirror: %v", err)
+	}
+	if mirrorOwner != nil {
+		t.Fatalf("mirror task_id = %v, want none: it is not input", *mirrorOwner)
+	}
+	if mirrorContext == nil || *mirrorContext != uuidToString(next.ID) {
+		t.Fatalf("mirror context_task_id = %v, want the new turn %s", mirrorContext, uuidToString(next.ID))
 	}
 }
