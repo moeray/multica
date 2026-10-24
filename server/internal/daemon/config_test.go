@@ -268,6 +268,57 @@ func TestPatternsFromEnv_DropsSeparatorBearingEntries(t *testing.T) {
 	}
 }
 
+func TestWorktreePackageImportMethodFromEnv(t *testing.T) {
+	const envName = "MULTICA_WORKTREE_PACKAGE_IMPORT_METHOD"
+	t.Setenv(envName, "")
+
+	if got, err := worktreePackageImportMethodFromEnv(envName, "windows"); err != nil || got != "copy" {
+		t.Fatalf("windows default = %q, %v; want copy", got, err)
+	}
+	if got, err := worktreePackageImportMethodFromEnv(envName, "linux"); err != nil || got != "auto" {
+		t.Fatalf("linux default = %q, %v; want auto", got, err)
+	}
+
+	for _, method := range []string{"auto", "copy", "hardlink", "clone", " COPY "} {
+		t.Setenv(envName, method)
+		got, err := worktreePackageImportMethodFromEnv(envName, "linux")
+		if err != nil {
+			t.Fatalf("%q: %v", method, err)
+		}
+		want := strings.ToLower(strings.TrimSpace(method))
+		if got != want {
+			t.Fatalf("%q resolved to %q, want %q", method, got, want)
+		}
+	}
+
+	t.Setenv(envName, "hard-link")
+	if _, err := worktreePackageImportMethodFromEnv(envName, "windows"); err == nil ||
+		!strings.Contains(err.Error(), envName) {
+		t.Fatalf("invalid method error = %v, want a named validation error", err)
+	}
+}
+
+func TestLoadConfig_GCDryRunAndWorktreePackageImportMethod(t *testing.T) {
+	redirectTestHome(t, t.TempDir())
+	t.Setenv("MULTICA_GC_DRY_RUN", "true")
+	t.Setenv("MULTICA_WORKTREE_PACKAGE_IMPORT_METHOD", "hardlink")
+
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:      "http://localhost:0",
+		WorkspacesRoot: t.TempDir(),
+		AllowNoAgents:  true,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.GCDryRun {
+		t.Fatal("GCDryRun = false, want true")
+	}
+	if cfg.WorktreePackageImportMethod != "hardlink" {
+		t.Fatalf("WorktreePackageImportMethod = %q, want hardlink", cfg.WorktreePackageImportMethod)
+	}
+}
+
 func TestIsSafeAgentName(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

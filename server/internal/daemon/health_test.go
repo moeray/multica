@@ -37,6 +37,38 @@ func TestHealthHandlerReportsEmptyCLICommitWithoutFallback(t *testing.T) {
 	}
 }
 
+func TestHealthHandlerReportsLastGCMetrics(t *testing.T) {
+	d := &Daemon{
+		cfg:        Config{DaemonID: "daemon-test", ServerBaseURL: "https://api.example.test"},
+		workspaces: map[string]*workspaceState{},
+		logger:     slog.Default(),
+	}
+	d.lastGC.Store(&GCMetrics{
+		CompletedAt:      time.Unix(123, 0).UTC(),
+		DryRun:           true,
+		CleanupSucceeded: 2,
+		CleanupSkipped:   3,
+		CleanupFailed:    1,
+		DryRunCandidates: 4,
+		BytesReclaimed:   4096,
+	})
+
+	rec := httptest.NewRecorder()
+	d.healthHandler(time.Now()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var resp HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if resp.LastGC == nil {
+		t.Fatal("last_gc is missing from /health")
+	}
+	if !resp.LastGC.DryRun || resp.LastGC.CleanupSucceeded != 2 ||
+		resp.LastGC.CleanupSkipped != 3 || resp.LastGC.CleanupFailed != 1 ||
+		resp.LastGC.DryRunCandidates != 4 || resp.LastGC.BytesReclaimed != 4096 {
+		t.Fatalf("last_gc = %+v", resp.LastGC)
+	}
+}
+
 func TestHealthHandlerReportsCLICommitAndSameIdentitySnapshot(t *testing.T) {
 	for _, commit := range []string{strings.Repeat("a", 40), "", "unknown", "2ae2dbb", "malformed"} {
 		t.Run("commit="+commit, func(t *testing.T) {

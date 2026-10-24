@@ -73,6 +73,12 @@ const (
 	localStateRefPrefix = "refs/multica/local-state/"
 )
 
+// defaultWorktreeReclaimableArtifacts mirrors the daemon's default GC artifact
+// patterns. It is only the fallback for direct execenv callers; production
+// passes the operator's configured patterns through
+// LocalWorktree.ReclaimableArtifactPatterns.
+var defaultWorktreeReclaimableArtifacts = []string{"node_modules", ".next", ".turbo"}
+
 // LocalWorktreeParams describes the worktree Prepare should build for a
 // local_directory task running in worktree mode.
 type LocalWorktreeParams struct {
@@ -195,6 +201,10 @@ type LocalWorktree struct {
 	// task-scoped branch, or the one a busy sibling forked. Recording a
 	// snapshot for those would leave a ref nothing ever reads.
 	tracksState bool
+	// ReclaimableArtifactPatterns names ignored directories that Finalize may
+	// delete before removing the worktree. The daemon sets this from its GC
+	// configuration; an empty list falls back to the conservative defaults.
+	ReclaimableArtifactPatterns []string
 	// priorState is the snapshot the branch carried when this turn started, and
 	// the one to record when this turn could not get its own into the branch.
 	priorState string
@@ -535,6 +545,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		// naming a branch that does not carry it.
 		outcome.Branch = ""
 		outcome.PreservedPath = w.Path
+		w.reclaimArtifacts(logger)
 		return outcome, fmt.Errorf("could not lock %q to finalize branch %s: %w; "+
 			"the work is preserved in the worktree at %s", w.GitRoot, w.Branch, err, w.Path)
 	}
@@ -551,6 +562,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		// preserved worktree path below is the honest pointer.
 		outcome.Branch = ""
 		outcome.PreservedPath = w.Path
+		w.reclaimArtifacts(logger)
 		if logger != nil {
 			logger.Error("execenv: worktree finalize aborted; nothing committed, worktree kept for inspection",
 				"path", w.Path, "branch", w.Branch, "git_root", w.GitRoot, "error", w.aborted)
@@ -570,6 +582,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 	if unmerged, unmergedErr := unmergedPaths(w.Path); unmergedErr != nil || len(unmerged) > 0 {
 		outcome.Branch = ""
 		outcome.PreservedPath = w.Path
+		w.reclaimArtifacts(logger)
 		if unmergedErr != nil {
 			return outcome, fmt.Errorf("could not check %s for an unresolved merge: %w; "+
 				"the work is preserved in the worktree at %s", w.Branch, unmergedErr, w.Path)
@@ -599,6 +612,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		committed, err := w.commitAll(logger)
 		if err != nil {
 			outcome.PreservedPath = w.Path
+			w.reclaimArtifacts(logger)
 			if logger != nil {
 				logger.Error("execenv: could not commit the agent's changes; keeping the worktree so the work is recoverable",
 					"path", w.Path, "branch", w.Branch, "git_root", w.GitRoot, "error", err)
@@ -636,6 +650,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		if w.priorState == "" {
 			outcome.Branch = ""
 			outcome.PreservedPath = w.Path
+			w.reclaimArtifacts(logger)
 			return outcome, fmt.Errorf(
 				"refusing to record branch %s: the merge with your local edits was never concluded and this branch has no earlier "+
 					"state to fall back on; the task worktree is preserved at %s (listed by `git worktree list` in %s)",
@@ -658,6 +673,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		if verifyErr := w.verifyDeliveryPoint(tip); verifyErr != nil {
 			outcome.Branch = ""
 			outcome.PreservedPath = w.Path
+			w.reclaimArtifacts(logger)
 			if logger != nil {
 				logger.Error("execenv: the run's delivery point cannot be recorded as this conversation's; nothing recorded, worktree kept",
 					"path", w.Path, "branch", w.Branch, "git_root", w.GitRoot, "tip", tip, "base", w.BaseCommit, "error", verifyErr)
@@ -669,6 +685,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 		if recErr := w.recordState(tip, logger); recErr != nil {
 			outcome.PreservedPath = w.Path
+			w.reclaimArtifacts(logger)
 			if logger != nil {
 				logger.Error("execenv: could not record the delivered task branch; keeping the worktree",
 					"path", w.Path, "branch", w.Branch, "git_root", w.GitRoot, "error", recErr)
@@ -681,7 +698,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 	}
 
-	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
+	if removeErr := removeLocalWorktreeDirWithArtifacts(w.GitRoot, w.Path, w.ReclaimableArtifactPatterns, logger); removeErr != nil {
 		outcome.PreservedPath = w.Path
 		return outcome, fmt.Errorf(
 			"could not remove finalized worktree for branch %s: %w; the task worktree remains at %s",
@@ -703,6 +720,16 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		)
 	}
 	return outcome, nil
+}
+
+// reclaimArtifacts drops ignored, regenerable directories before a worktree is
+// preserved or removed. Source and untracked-but-not-ignored files are never
+// touched; git clean -X is scoped to ignored content under the named paths.
+func (w *LocalWorktree) reclaimArtifacts(logger *slog.Logger) {
+	if w == nil {
+		return
+	}
+	reclaimWorktreeArtifacts(w.Path, w.ReclaimableArtifactPatterns, logger)
 }
 
 // Discard tears a worktree down without delivering anything: unregister it,
@@ -727,7 +754,7 @@ func (w *LocalWorktree) Discard(logger *slog.Logger) {
 		return
 	}
 	defer unlock()
-	removeLocalWorktreeDir(w.GitRoot, w.Path, logger)
+	removeLocalWorktreeDirWithArtifacts(w.GitRoot, w.Path, w.ReclaimableArtifactPatterns, logger)
 	// Same rule as every other teardown: a branch this prepare did not create
 	// belongs to the turns before it and outlives this task.
 	if w.createdBranch {
@@ -840,6 +867,18 @@ func worktreeIsDirty(worktreePath string) (bool, error) {
 // deletes its directory. The branch is deliberately left alone — it is the
 // task's deliverable.
 func removeLocalWorktreeDir(gitRoot, worktreePath string, logger *slog.Logger) error {
+	return removeLocalWorktreeDirWithArtifacts(gitRoot, worktreePath, nil, logger)
+}
+
+func removeLocalWorktreeDirWithArtifacts(gitRoot, worktreePath string, patterns []string, logger *slog.Logger) error {
+	// On Windows, pnpm's hardlink mode makes a worktree's package files share
+	// an open file object with the main checkout or pnpm store. Dropping the
+	// ignored trees first avoids handing `git worktree remove` a directory it
+	// cannot unlink; if the agent left source behind, it is untouched and the
+	// preserved worktree is still useful.
+	if _, err := os.Lstat(worktreePath); err == nil {
+		reclaimWorktreeArtifacts(worktreePath, patterns, logger)
+	}
 	var removeErr error
 	if out, err := runGit(gitRoot, "worktree", "remove", "--force", worktreePath); err != nil {
 		removeErr = err
@@ -871,6 +910,58 @@ func removeLocalWorktreeDir(gitRoot, worktreePath string, logger *slog.Logger) e
 		return fmt.Errorf("worktree directory still exists after removal fallback: %w", removeErr)
 	}
 	return errors.New("worktree directory still exists after git removal reported success")
+}
+
+// reclaimWorktreeArtifacts removes only git-ignored content under the
+// configured artifact directories. Paths are basename-only so a pattern from
+// environment configuration cannot escape the worktree.
+func reclaimWorktreeArtifacts(worktreePath string, patterns []string, logger *slog.Logger) {
+	if worktreePath == "" {
+		return
+	}
+	names := reclaimableArtifactNames(patterns)
+	if len(names) == 0 {
+		return
+	}
+	args := append([]string{"clean", "-ffdX", "--"}, names...)
+	out, err := runGit(worktreePath, args...)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("execenv: reclaim ignored worktree artifacts failed",
+				"path", worktreePath, "patterns", names, "output", strings.TrimSpace(out), "error", err)
+		}
+		return
+	}
+	removed := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			removed++
+		}
+	}
+	if removed > 0 && logger != nil {
+		logger.Info("execenv: reclaimed ignored worktree artifacts",
+			"path", worktreePath, "patterns", names, "entries", removed)
+	}
+}
+
+func reclaimableArtifactNames(patterns []string) []string {
+	if len(patterns) == 0 {
+		patterns = defaultWorktreeReclaimableArtifacts
+	}
+	seen := make(map[string]struct{}, len(patterns))
+	names := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" || pattern == "." || pattern == ".." || strings.ContainsAny(pattern, "/\\") {
+			continue
+		}
+		if _, ok := seen[pattern]; ok {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		names = append(names, pattern)
+	}
+	return names
 }
 
 // deleteBranch drops a task branch that carries nothing worth keeping — an

@@ -36,6 +36,7 @@ func (d *Daemon) gcLoop(ctx context.Context) {
 		"ttl", d.cfg.GCTTL,
 		"completed_task_ttl", d.cfg.GCCompletedTaskTTL,
 		"orphan_ttl", d.cfg.GCOrphanTTL,
+		"dry_run", d.cfg.GCDryRun,
 		"artifact_ttl", d.cfg.GCArtifactTTL,
 		"repo_ttl", d.cfg.GCRepoTTL,
 		"repo_maintenance_enabled", d.cfg.GCRepoMaintenanceEnabled,
@@ -64,12 +65,16 @@ func (d *Daemon) gcLoop(ctx context.Context) {
 
 // gcStats accumulates byte counts and per-pattern hit counts for one GC cycle.
 type gcStats struct {
-	cleaned         int // whole task dirs removed by a parent-lifecycle or completed-task policy
-	orphaned        int // whole task dirs removed (no meta / unreachable issue)
-	skipped         int // task dirs left untouched
-	artifactDirs    int // task dirs that had at least one artifact reclaimed
-	artifactRemoved int // count of removed artifact subdirs
-	storesReclaimed int // per-conversation Codex session stores reclaimed past their TTL
+	cleaned          int // whole task dirs removed by a parent-lifecycle or completed-task policy
+	orphaned         int // whole task dirs removed (no meta / unreachable issue)
+	skipped          int // task dirs left untouched
+	cleanupSucceeded int // task dirs or artifact sets actually reclaimed
+	cleanupSkipped   int // cleanup was intentionally skipped or could not be attempted safely
+	cleanupFailed    int // a cleanup attempt failed
+	dryRunCandidates int // destructive actions a dry run would have taken
+	artifactDirs     int // task dirs that had at least one artifact reclaimed
+	artifactRemoved  int // count of removed artifact subdirs
+	storesReclaimed  int // per-conversation Codex session stores reclaimed past their TTL
 	// hermesMemoryStoresReclaimed is counted separately from storesReclaimed:
 	// the two stores hold different things on different TTLs, so folding them
 	// into one number would make either figure unreadable for an operator.
@@ -80,6 +85,23 @@ type gcStats struct {
 	taskRootIndexEntriesReclaimed int            // abandoned stable-root records and unpublished entries reclaimed past the orphan TTL
 	bytesReclaimed                int64          // total bytes freed in this cycle
 	byPattern                     map[string]int // configured basename or managed path label -> reclaim count
+}
+
+// GCMetrics is the last completed GC cycle's outcome summary. It is exposed on
+// /health so an operator can distinguish a clean cycle from one that skipped
+// work or failed without reading daemon.log.
+type GCMetrics struct {
+	CompletedAt      time.Time `json:"completed_at"`
+	DryRun           bool      `json:"dry_run"`
+	Cleaned          int       `json:"cleaned"`
+	Orphaned         int       `json:"orphaned"`
+	CleanupSucceeded int       `json:"cleanup_succeeded"`
+	CleanupSkipped   int       `json:"cleanup_skipped"`
+	CleanupFailed    int       `json:"cleanup_failed"`
+	DryRunCandidates int       `json:"dry_run_candidates"`
+	ArtifactDirs     int       `json:"artifact_dirs"`
+	ArtifactRemoved  int       `json:"artifact_removed"`
+	BytesReclaimed   int64     `json:"bytes_reclaimed"`
 }
 
 // runGC performs a single GC scan across all workspace directories.
@@ -115,49 +137,59 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// reaches ClaimEnvRoot, no task directory exists for the normal GC walk to
 	// reclaim. Bound those records separately, but only after the orphan grace
 	// period and an authoritative terminal/not-found task check.
-	rootRecordsRemoved, rootRecordsErr := execenv.PruneTaskRootIndex(root, d.cfg.GCOrphanTTL, time.Now(), func(_ string, taskID string) bool {
-		if ctx.Err() != nil || d.client == nil {
-			return false
+	if !d.cfg.GCDryRun {
+		rootRecordsRemoved, rootRecordsErr := execenv.PruneTaskRootIndex(root, d.cfg.GCOrphanTTL, time.Now(), func(_ string, taskID string) bool {
+			if ctx.Err() != nil || d.client == nil {
+				return false
+			}
+			status, statusErr := d.client.GetTaskGCCheck(ctx, taskID)
+			if statusErr != nil {
+				return isAccessNotFound(statusErr)
+			}
+			return isAgentTaskTerminal(status.Status)
+		})
+		if rootRecordsErr != nil {
+			d.logger.Warn("gc: prune task root index failed", "error", rootRecordsErr)
 		}
-		status, statusErr := d.client.GetTaskGCCheck(ctx, taskID)
-		if statusErr != nil {
-			return isAccessNotFound(statusErr)
-		}
-		return isAgentTaskTerminal(status.Status)
-	})
-	if rootRecordsErr != nil {
-		d.logger.Warn("gc: prune task root index failed", "error", rootRecordsErr)
+		stats.taskRootIndexEntriesReclaimed += rootRecordsRemoved
 	}
-	stats.taskRootIndexEntriesReclaimed += rootRecordsRemoved
 
 	// Prune stale worktree references from all bare repo caches, then evict the
 	// caches nothing needs anymore. These live outside any workspace directory
 	// and are never reclaimed by the task walk above.
-	d.pruneRepoWorktreesContext(ctx, root, stats)
+	if !d.cfg.GCDryRun {
+		d.pruneRepoWorktreesContext(ctx, root, stats)
+	}
 
 	// Reclaim per-issue Codex session stores idle past their TTL. These live
 	// under the shared ~/.codex home (outside WorkspacesRoot) so resume survives
 	// the task GC, which means they need their own bounded lifecycle (MUL-4424).
-	if storesRemoved, storeBytes := execenv.PruneCodexSessionStores(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
-		stats.storesReclaimed += storesRemoved
-		stats.bytesReclaimed += storeBytes
+	if !d.cfg.GCDryRun {
+		if storesRemoved, storeBytes := execenv.PruneCodexSessionStores(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
+			stats.storesReclaimed += storesRemoved
+			stats.bytesReclaimed += storeBytes
+		}
 	}
 
 	// Same for per-agent Hermes memory stores: they outlive the task by design
 	// (that is what fixes #6638), so a deleted agent's memory needs its own
 	// bounded lifecycle. Retention is much longer than the Codex one — these are
 	// a few markdown files, and reclaiming them is user-visible amnesia.
-	if storesRemoved, storeBytes := execenv.PruneHermesMemoryStores(d.cfg.Profile, d.cfg.GCHermesMemoryTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
-		stats.hermesMemoryStoresReclaimed += storesRemoved
-		stats.bytesReclaimed += storeBytes
+	if !d.cfg.GCDryRun {
+		if storesRemoved, storeBytes := execenv.PruneHermesMemoryStores(d.cfg.Profile, d.cfg.GCHermesMemoryTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
+			stats.hermesMemoryStoresReclaimed += storesRemoved
+			stats.bytesReclaimed += storeBytes
+		}
 	}
 
 	// And per-conversation Hermes session stores, which outlive the task for the
 	// same reason (that is what fixes #6806) but hold transcripts rather than
 	// notes — so they get the shorter, Codex-like retention.
-	if storesRemoved, storeBytes := execenv.PruneHermesSessionStores(d.cfg.Profile, d.cfg.GCHermesSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
-		stats.hermesSessionStoresReclaimed += storesRemoved
-		stats.bytesReclaimed += storeBytes
+	if !d.cfg.GCDryRun {
+		if storesRemoved, storeBytes := execenv.PruneHermesSessionStores(d.cfg.Profile, d.cfg.GCHermesSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
+			stats.hermesSessionStoresReclaimed += storesRemoved
+			stats.bytesReclaimed += storeBytes
+		}
 	}
 
 	// Reclaim per-task temp dirs whose owning execution is gone. These are the
@@ -168,30 +200,49 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// a file inside is still open (#7364). Unlike every other pruner here this
 	// one asks the kernel, not the clock: it removes a directory only once it
 	// has acquired the .task_lock the owner would still be holding.
-	if base, _, err := taskTempBaseDir(); err == nil {
-		if tempRemoved, tempBytes := execenv.PruneTaskTempDirs(base, d.cfg.GCTaskTempLegacyTTL, time.Now(), d.logger); tempRemoved > 0 {
-			stats.taskTempDirsReclaimed += tempRemoved
-			stats.bytesReclaimed += tempBytes
+	if !d.cfg.GCDryRun {
+		if base, _, err := taskTempBaseDir(); err == nil {
+			if tempRemoved, tempBytes := execenv.PruneTaskTempDirs(base, d.cfg.GCTaskTempLegacyTTL, time.Now(), d.logger); tempRemoved > 0 {
+				stats.taskTempDirsReclaimed += tempRemoved
+				stats.bytesReclaimed += tempBytes
+			}
 		}
 	}
 
-	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootIndexEntriesReclaimed > 0 {
-		d.logger.Info("gc: cycle complete",
-			"cleaned", stats.cleaned,
-			"orphaned", stats.orphaned,
-			"skipped", stats.skipped,
-			"artifact_dirs", stats.artifactDirs,
-			"artifact_removed", stats.artifactRemoved,
-			"codex_session_stores_reclaimed", stats.storesReclaimed,
-			"hermes_memory_stores_reclaimed", stats.hermesMemoryStoresReclaimed,
-			"hermes_session_stores_reclaimed", stats.hermesSessionStoresReclaimed,
-			"repo_caches_reclaimed", stats.repoCachesReclaimed,
-			"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
-			"task_root_index_entries_reclaimed", stats.taskRootIndexEntriesReclaimed,
-			"bytes_reclaimed", stats.bytesReclaimed,
-			"by_pattern", stats.byPattern,
-		)
+	metrics := &GCMetrics{
+		CompletedAt:      time.Now().UTC(),
+		DryRun:           d.cfg.GCDryRun,
+		Cleaned:          stats.cleaned,
+		Orphaned:         stats.orphaned,
+		CleanupSucceeded: stats.cleanupSucceeded,
+		CleanupSkipped:   stats.cleanupSkipped,
+		CleanupFailed:    stats.cleanupFailed,
+		DryRunCandidates: stats.dryRunCandidates,
+		ArtifactDirs:     stats.artifactDirs,
+		ArtifactRemoved:  stats.artifactRemoved,
+		BytesReclaimed:   stats.bytesReclaimed,
 	}
+	d.lastGC.Store(metrics)
+	d.logger.Info("gc: cycle complete",
+		"dry_run", metrics.DryRun,
+		"cleaned", metrics.Cleaned,
+		"orphaned", metrics.Orphaned,
+		"cleanup_succeeded", metrics.CleanupSucceeded,
+		"cleanup_skipped", metrics.CleanupSkipped,
+		"cleanup_failed", metrics.CleanupFailed,
+		"dry_run_candidates", metrics.DryRunCandidates,
+		"skipped", stats.skipped,
+		"artifact_dirs", metrics.ArtifactDirs,
+		"artifact_removed", metrics.ArtifactRemoved,
+		"codex_session_stores_reclaimed", stats.storesReclaimed,
+		"hermes_memory_stores_reclaimed", stats.hermesMemoryStoresReclaimed,
+		"hermes_session_stores_reclaimed", stats.hermesSessionStoresReclaimed,
+		"repo_caches_reclaimed", stats.repoCachesReclaimed,
+		"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
+		"task_root_index_entries_reclaimed", stats.taskRootIndexEntriesReclaimed,
+		"bytes_reclaimed", metrics.BytesReclaimed,
+		"by_pattern", stats.byPattern,
+	)
 }
 
 // gcWorkspace scans task directories inside a single workspace directory.
@@ -322,55 +373,92 @@ func (d *Daemon) gcWorkspaceIssues(ctx context.Context, workspaceID string, cand
 // atomically reserves the env root because a task can start while the server
 // reconciliation request is in flight.
 func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAction, stats *gcStats) int {
-	if action != gcActionSkip {
-		if _, err := d.gcTaskDirOwner(taskDir); err != nil {
-			d.logger.Warn("gc: refusing to mutate unowned task directory", "dir", taskDir, "error", err)
-			stats.skipped++
-			return 0
-		}
-		release, ok := d.reserveEnvRootForGC(taskDir)
-		if !ok {
-			stats.skipped++
-			return 0
-		}
-		defer release()
-		// Re-read provenance after taking the exclusion lock so a concurrent
-		// reset cannot change ownership between validation and mutation.
-		if _, err := d.gcTaskDirOwner(taskDir); err != nil {
-			d.logger.Warn("gc: refusing to mutate task directory after ownership changed", "dir", taskDir, "error", err)
-			stats.skipped++
-			return 0
-		}
+	if action == gcActionSkip {
+		stats.skipped++
+		return 0
+	}
+	if _, err := d.gcTaskDirOwner(taskDir); err != nil {
+		d.logger.Warn("gc: refusing to mutate unowned task directory", "dir", taskDir, "error", err)
+		stats.skipped++
+		stats.cleanupSkipped++
+		return 0
+	}
+	if d.cfg.GCDryRun {
+		stats.dryRunCandidates++
+		stats.skipped++
+		d.logger.Info("gc: dry run; would clean",
+			"dir", taskDir, "action", action.String())
+		return 0
+	}
+	release, ok := d.reserveEnvRootForGC(taskDir)
+	if !ok {
+		stats.skipped++
+		stats.cleanupSkipped++
+		return 0
+	}
+	defer release()
+	// Re-read provenance after taking the exclusion lock so a concurrent
+	// reset cannot change ownership between validation and mutation.
+	if _, err := d.gcTaskDirOwner(taskDir); err != nil {
+		d.logger.Warn("gc: refusing to mutate task directory after ownership changed", "dir", taskDir, "error", err)
+		stats.skipped++
+		stats.cleanupSkipped++
+		return 0
 	}
 	switch action {
 	case gcActionClean:
-		bytes, removed := d.cleanTaskDir(taskDir)
-		if !removed {
+		bytes, outcome := d.cleanTaskDir(taskDir)
+		switch outcome {
+		case cleanupSucceeded:
+			stats.cleaned++
+			stats.cleanupSucceeded++
+			stats.bytesReclaimed += bytes
+			return 1
+		case cleanupFailed:
+			stats.cleanupFailed++
+			return 0
+		default:
 			stats.skipped++
+			stats.cleanupSkipped++
 			return 0
 		}
-		stats.cleaned++
-		stats.bytesReclaimed += bytes
-		return 1
 	case gcActionOrphan:
-		bytes, removed := d.cleanTaskDir(taskDir)
-		if !removed {
+		bytes, outcome := d.cleanTaskDir(taskDir)
+		switch outcome {
+		case cleanupSucceeded:
+			stats.orphaned++
+			stats.cleanupSucceeded++
+			stats.bytesReclaimed += bytes
+			return 1
+		case cleanupFailed:
+			stats.cleanupFailed++
+			return 0
+		default:
 			stats.skipped++
+			stats.cleanupSkipped++
 			return 0
 		}
-		stats.orphaned++
-		stats.bytesReclaimed += bytes
-		return 1
 	case gcActionCleanArtifacts:
 		removed, bytes, perPattern := d.cleanTaskArtifacts(ctx, taskDir, d.cfg.GCArtifactPatterns)
 		recordArtifactCleanup(stats, removed, bytes, perPattern)
+		if removed > 0 {
+			stats.cleanupSucceeded++
+		} else {
+			stats.cleanupSkipped++
+		}
 		stats.skipped++ // task dir itself preserved
 	case gcActionCleanManagedArtifacts:
 		removed, bytes, perPattern := d.cleanManagedTaskArtifacts(taskDir)
 		recordArtifactCleanup(stats, removed, bytes, perPattern)
+		if removed > 0 {
+			stats.cleanupSucceeded++
+		} else {
+			stats.cleanupSkipped++
+		}
 		stats.skipped++ // task dir itself preserved
 	default:
 		stats.skipped++
+		stats.cleanupSkipped++
 	}
 	return 0
 }
@@ -398,6 +486,29 @@ const (
 	gcActionOrphan                         // no meta or unknown issue and dir is old
 	gcActionCleanArtifacts                 // task completed long enough ago; drop regenerable artifacts only
 	gcActionCleanManagedArtifacts          // preserve the task and drop exact daemon-managed artifacts only
+)
+
+func (a gcAction) String() string {
+	switch a {
+	case gcActionClean:
+		return "clean"
+	case gcActionOrphan:
+		return "orphan"
+	case gcActionCleanArtifacts:
+		return "clean_artifacts"
+	case gcActionCleanManagedArtifacts:
+		return "clean_managed_artifacts"
+	default:
+		return "skip"
+	}
+}
+
+type taskCleanupOutcome int
+
+const (
+	cleanupSkipped taskCleanupOutcome = iota
+	cleanupSucceeded
+	cleanupFailed
 )
 
 // shouldCleanTaskDir decides whether a task directory should be removed.
@@ -892,9 +1003,10 @@ func (d *Daemon) gcTaskDirOwner(taskDir string) (*execenv.EnvRootOwner, error) {
 }
 
 // cleanTaskDir removes a proven daemon-owned task directory, logs the
-// reclaimed bytes, and returns that count for the cycle summary. A failed or
-// refused removal reports removed=false.
-func (d *Daemon) cleanTaskDir(taskDir string) (bytes int64, removed bool) {
+// reclaimed bytes, and reports whether the attempt succeeded, was refused, or
+// failed. The distinction matters to the cycle summary: a safety refusal is not
+// an operational failure.
+func (d *Daemon) cleanTaskDir(taskDir string) (bytes int64, outcome taskCleanupOutcome) {
 	// Measure first, prove ownership second. dirSize walks the entire tree,
 	// which on a large task directory takes long enough for the validated
 	// directory to be replaced underneath us — checking before that walk would
@@ -904,18 +1016,18 @@ func (d *Daemon) cleanTaskDir(taskDir string) (bytes int64, removed bool) {
 	owner, ownerErr := d.gcTaskDirOwner(taskDir)
 	if ownerErr != nil {
 		d.logger.Warn("gc: refusing to remove unowned task directory", "dir", taskDir, "error", ownerErr)
-		return 0, false
+		return 0, cleanupSkipped
 	}
 	if err := os.RemoveAll(taskDir); err != nil {
 		d.logger.Warn("gc: remove task dir failed", "dir", taskDir, "error", err)
-		return 0, false
+		return 0, cleanupFailed
 	} else {
 		d.logger.Info("gc: removed", "dir", taskDir, "bytes_reclaimed", bytes)
 	}
 	if err := execenv.RemoveRootDirRecord(d.cfg.WorkspacesRoot, taskDir, *owner); err != nil {
 		d.logger.Warn("gc: remove stable task root record failed", "dir", taskDir, "error", err)
 	}
-	return bytes, true
+	return bytes, cleanupSucceeded
 }
 
 // linkedDirModes are the mode bits that mark a directory entry as a link to

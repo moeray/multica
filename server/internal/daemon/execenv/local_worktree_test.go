@@ -118,6 +118,27 @@ func gitTry(t *testing.T, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+func worktreeListContains(t *testing.T, repo, path string) bool {
+	t.Helper()
+	want := filepath.Clean(path)
+	wantInfo, _ := os.Stat(want)
+	for _, line := range strings.Split(gitRun(t, repo, "worktree", "list", "--porcelain"), "\n") {
+		entry, ok := strings.CutPrefix(line, "worktree ")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(filepath.Clean(entry), want) {
+			return true
+		}
+		if wantInfo != nil {
+			if info, err := os.Stat(filepath.Clean(entry)); err == nil && os.SameFile(wantInfo, info) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -272,7 +293,7 @@ func TestFinalizeCommitsLeftoversAboveTheUserBaseline(t *testing.T) {
 	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
 		t.Errorf("worktree directory still present after Finalize: %v", err)
 	}
-	if list := gitRun(t, repo, "worktree", "list"); strings.Contains(list, wt.Path) {
+	if list := gitRun(t, repo, "worktree", "list"); worktreeListContains(t, repo, wt.Path) {
 		t.Errorf("worktree still registered in user's repo:\n%s", list)
 	}
 	// The user's own checkout must be untouched by any of it.
@@ -291,6 +312,39 @@ func TestFinalizeCommitsLeftoversAboveTheUserBaseline(t *testing.T) {
 	// And the user's uncommitted edit still reached the branch.
 	if got := gitRun(t, repo, "show", outcome.Branch+":tracked.txt"); got != "edited by user" {
 		t.Errorf("branch lost the user's uncommitted edit, got %q", got)
+	}
+}
+
+func TestReclaimWorktreeArtifactsOnlyRemovesIgnoredContent(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".gitignore"), "node_modules/\n.next/\n.turbo/\n")
+	gitRun(t, repo, "add", ".gitignore")
+	gitRun(t, repo, "commit", "-m", "ignore generated artifacts")
+	wt := prepareForTest(t, repo)
+
+	writeFile(t, filepath.Join(wt.Path, "node_modules", "pkg", "index.js"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, ".next", "cache", "entry"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, ".turbo", "log"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, "notes.txt"), "agent source\n")
+	writeFile(t, filepath.Join(wt.Path, "tracked.txt"), "agent edit\n")
+
+	reclaimWorktreeArtifacts(wt.Path, []string{"node_modules", ".next", "../escape", ".turbo"}, worktreeTestLogger())
+
+	for _, generated := range []string{"node_modules", ".next", ".turbo"} {
+		if _, err := os.Stat(filepath.Join(wt.Path, generated)); !os.IsNotExist(err) {
+			t.Errorf("ignored artifact %s still exists: %v", generated, err)
+		}
+	}
+	if got := readFile(t, filepath.Join(wt.Path, "notes.txt")); got != "agent source\n" {
+		t.Errorf("untracked source changed: %q", got)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, "tracked.txt")); got != "agent edit\n" {
+		t.Errorf("tracked source changed: %q", got)
+	}
+
+	if err := removeLocalWorktreeDir(repo, wt.Path, worktreeTestLogger()); err != nil {
+		t.Fatalf("remove worktree: %v", err)
 	}
 }
 
@@ -537,9 +591,13 @@ func finalizeOK(t *testing.T, wt *LocalWorktree) LocalWorktreeOutcome {
 func TestFinalizeKeepsWorktreeWhenCommitFails(t *testing.T) {
 	t.Parallel()
 	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".gitignore"), "node_modules/\n.next/\n.turbo/\n")
+	gitRun(t, repo, "add", ".gitignore")
+	gitRun(t, repo, "commit", "-m", "ignore generated artifacts")
 	wt := prepareForTest(t, repo)
 
 	writeFile(t, filepath.Join(wt.Path, "agent-output.txt"), "irreplaceable work\n")
+	writeFile(t, filepath.Join(wt.Path, "node_modules", "pkg", "large.bin"), "regenerable\n")
 
 	// Force every commit in this worktree to fail the way a signing setup the
 	// daemon can't satisfy would.
@@ -558,8 +616,11 @@ func TestFinalizeKeepsWorktreeWhenCommitFails(t *testing.T) {
 	if got := readFile(t, filepath.Join(wt.Path, "agent-output.txt")); got != "irreplaceable work\n" {
 		t.Errorf("agent work was destroyed despite the commit failure, got %q", got)
 	}
+	if _, statErr := os.Stat(filepath.Join(wt.Path, "node_modules")); !os.IsNotExist(statErr) {
+		t.Errorf("regenerable node_modules was kept in the preserved worktree: %v", statErr)
+	}
 	// And it stays discoverable through git rather than only a log line.
-	if list := gitRun(t, repo, "worktree", "list"); !strings.Contains(list, wt.Path) {
+	if list := gitRun(t, repo, "worktree", "list"); !worktreeListContains(t, repo, wt.Path) {
 		t.Errorf("preserved worktree is no longer registered, so the user cannot find it:\n%s", list)
 	}
 	if !strings.Contains(err.Error(), wt.Path) {
@@ -738,7 +799,7 @@ func TestFinalizeAbortRefusesToCommitAndKeepsWorktree(t *testing.T) {
 	if got := readFile(t, filepath.Join(wt.Path, "agent-output.txt")); got != "real work\n" {
 		t.Errorf("agent work was destroyed: %q", got)
 	}
-	if list := gitRun(t, repo, "worktree", "list"); !strings.Contains(list, wt.Path) {
+	if list := gitRun(t, repo, "worktree", "list"); !worktreeListContains(t, repo, wt.Path) {
 		t.Errorf("preserved worktree is no longer registered:\n%s", list)
 	}
 }
@@ -784,7 +845,7 @@ func TestDiscardRemovesWorktreeAndBranch(t *testing.T) {
 	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
 		t.Errorf("worktree directory survived Discard: %v", err)
 	}
-	if list := gitRun(t, repo, "worktree", "list"); strings.Contains(list, wt.Path) {
+	if list := gitRun(t, repo, "worktree", "list"); worktreeListContains(t, repo, wt.Path) {
 		t.Errorf("worktree still registered after Discard:\n%s", list)
 	}
 	if out, err := gitTry(t, repo, "rev-parse", "--verify", wt.Branch); err == nil {
