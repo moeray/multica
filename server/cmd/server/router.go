@@ -2433,6 +2433,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Patch("/pin", h.SetChatSessionPinned)
 					r.Patch("/archive", h.SetChatSessionArchived)
 					r.Put("/channel-binding", h.SwitchChatSessionChannelBinding)
+					// Reattach this Chat to the external conversation it came
+					// from, after an archive retired that route (MP-70).
+					r.Post("/channel-binding", h.AttachChatSessionChannelBinding)
 					r.Delete("/", h.DeleteChatSession)
 					r.Post("/messages", h.SendChatMessage)
 					r.Post("/onboarding", h.StartMikaOnboarding)

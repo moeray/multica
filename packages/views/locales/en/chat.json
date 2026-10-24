@@ -266,6 +266,27 @@
       "forbidden_error": "You can't change this Feishu binding.",
       "not_found_error": "That chat is no longer available.",
       "generic_error": "Couldn't change the binding. Try again."
+    },
+    "rebind": "Rebind",
+    "rebind_dialog": {
+      "description": "This chat was used through Feishu. Rebinding makes Feishu messages arrive here again.",
+      "confirm": "Rebind",
+      "rebinding": "Rebinding...",
+      "cancel": "Cancel",
+      "conflict_error": "That Feishu conversation is now bound to another chat. Open that chat and use \"Change bound chat\" to move it back here.",
+      "forbidden_error": "You can't change this binding.",
+      "not_found_error": "This chat is no longer available.",
+      "generic_error": "Couldn't rebind this chat. Try again.",
+      "unavailable_title": "Binding can't be restored",
+      "unavailable": "An older version deleted this chat's Feishu binding, so the Feishu conversation it came from is no longer recorded. Send the agent a message in Feishu, then use \"Change bound chat\" on the new chat to move it back here.",
+      "close": "Got it"
+    },
+    "archive_binding": {
+      "title": "Archive and disconnect Feishu?",
+      "description": "This chat currently receives Feishu messages. Archiving stops them from arriving; unarchive and rebind to restore it.",
+      "cancel": "Cancel",
+      "confirm": "Archive",
+      "archiving": "Archiving..."
     }
   },
   "header": {

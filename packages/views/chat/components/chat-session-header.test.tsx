@@ -6,6 +6,8 @@ import enChat from "../../locales/en/chat.json";
 
 const updateMutate = vi.hoisted(() => vi.fn());
 const switchBindingMutate = vi.hoisted(() => vi.fn());
+const attachBindingMutate = vi.hoisted(() => vi.fn());
+const archiveMutate = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/paths", () => ({
   useWorkspacePaths: () => ({ agentDetail: (id: string) => `/agents/${id}` }),
@@ -14,9 +16,13 @@ vi.mock("@multica/core/paths", () => ({
 vi.mock("@multica/core/chat/mutations", () => ({
   useUpdateChatSession: () => ({ mutate: updateMutate }),
   useDeleteChatSession: () => ({ mutate: vi.fn() }),
-  useSetChatSessionArchived: () => ({ mutate: vi.fn() }),
+  useSetChatSessionArchived: () => ({ mutate: archiveMutate }),
   useSwitchChatSessionChannelBinding: () => ({
     mutateAsync: switchBindingMutate,
+    isPending: false,
+  }),
+  useAttachChatSessionChannelBinding: () => ({
+    mutateAsync: attachBindingMutate,
     isPending: false,
   }),
 }));
@@ -273,8 +279,61 @@ describe("ChatSessionHeader Feishu channel state", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps historical and read-only Feishu routes free of the switch action", () => {
-    const { unmount } = render(
+  it("offers rebind instead of a switch for a retired Feishu route", () => {
+    renderHeader(
+      {
+        ...session,
+        channel_source: { ...channelSource, channel_chat_id: "chat-1" },
+        is_current_channel_route: false,
+      },
+      { canChangeBinding: true },
+    );
+
+    expect(
+      screen.getByRole("button", { name: enChat.channel.rebind }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.change_binding }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the rebind entry for a chat whose binding row was deleted", () => {
+    renderHeader(
+      { ...session, channel_origin: true },
+      { canChangeBinding: true },
+    );
+
+    expect(
+      screen.getByRole("button", { name: enChat.channel.rebind }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows neither channel action for a first-party chat", () => {
+    renderHeader(session, { canChangeBinding: true });
+
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.rebind }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.change_binding }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides rebind from callers who cannot change bindings and on archived chats", () => {
+    renderHeader(
+      {
+        ...session,
+        channel_source: { ...channelSource, channel_chat_id: "chat-1" },
+        is_current_channel_route: false,
+      },
+      { canChangeBinding: false },
+    );
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.rebind }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps historical and read-only Feishu routes free of the switch action", () => {    const { unmount } = render(
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
         <ChatSessionHeader
           session={{
@@ -303,5 +362,71 @@ describe("ChatSessionHeader Feishu channel state", () => {
     expect(
       screen.queryByRole("button", { name: enChat.channel.change_binding }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatSessionHeader archive confirmation", () => {
+  beforeEach(() => {
+    archiveMutate.mockReset();
+  });
+
+  const boundRoute = {
+    channel_type: "feishu",
+    chat_type: "p2p",
+    installation_id: "installation-1",
+    channel_chat_id: "chat-1",
+    route_revision: 1,
+  };
+
+  function openArchiveMenuItem() {
+    fireEvent.click(
+      screen.getByRole("button", { name: enChat.list.row_actions_aria }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: enChat.header.archive }));
+  }
+
+  it("warns that archiving disconnects Feishu and waits for confirmation", () => {
+    const onArchive = vi.fn();
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatSessionHeader
+          session={{
+            ...session,
+            channel_source: boundRoute,
+            is_current_channel_route: true,
+            channel_origin: true,
+          }}
+          agent={null}
+          onArchive={onArchive}
+        />
+      </I18nProvider>,
+    );
+
+    openArchiveMenuItem();
+
+    expect(onArchive).not.toHaveBeenCalled();
+    expect(screen.getByText(enChat.channel.archive_binding.title)).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: enChat.channel.archive_binding.confirm }),
+    );
+    expect(onArchive).toHaveBeenCalledTimes(1);
+  });
+
+  it("archives a chat with no current channel route without asking", () => {
+    const onArchive = vi.fn();
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatSessionHeader session={session} agent={null} onArchive={onArchive} />
+      </I18nProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: enChat.list.row_actions_aria }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: enChat.header.archive }));
+
+    expect(onArchive).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(enChat.channel.archive_binding.title)).not.toBeInTheDocument();
   });
 });

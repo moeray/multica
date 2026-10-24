@@ -794,14 +794,18 @@ VALUES ($1, 'feishu', $2, $3, 'final')
 	}
 }
 
-// TestSetChatSessionArchived_ClearsChannelBinding verifies the archive path
-// severs the external-channel link (MUL-4372): the channel engine resolves
-// inbound Feishu/Slack traffic through channel_chat_session_binding without
-// checking session status, so an archived-but-still-bound session kept
-// accumulating agent replies and a stuck, uncleared unread badge. Archiving must
-// drop the binding so the next inbound message forks a fresh session; unarchive
-// must NOT recreate it (a later session may already own the channel).
-func TestSetChatSessionArchived_ClearsChannelBinding(t *testing.T) {
+// TestSetChatSessionArchived_RetiresChannelBinding verifies the archive path
+// severs the external-channel route (MUL-4372) without losing the record of it
+// (MP-70). The channel engine resolves inbound Feishu/Slack traffic through
+// channel_chat_session_binding without checking session status, so an
+// archived-but-still-bound session kept accumulating agent replies and a stuck,
+// uncleared unread badge; the route must stop being current. Deleting the row
+// went one step too far: channel_source vanished with it, and nothing could
+// describe the external chat this session came from any more, which is why the
+// rebind entry disappeared for good. So the row must survive, retired.
+// Unarchive still must NOT reactivate it on its own (a later session may already
+// own the channel); reattaching is an explicit action.
+func TestSetChatSessionArchived_RetiresChannelBinding(t *testing.T) {
 	agentID := createHandlerTestAgent(t, "ChatArchiveBindingAgent", []byte("[]"))
 	sessionID := createHandlerTestChatSession(t, agentID)
 	ctx := context.Background()
@@ -836,7 +840,7 @@ VALUES ($1, $2, 'feishu', $3, 'p2p')
 		t.Fatalf("insert channel_chat_session_binding: %v", err)
 	}
 
-	archive := func(archived bool) {
+	archive := func(archived bool) ChatSessionResponse {
 		t.Helper()
 		payload := `{"archived":false}`
 		if archived {
@@ -851,23 +855,40 @@ VALUES ($1, $2, 'feishu', $3, 'p2p')
 		if w.Code != http.StatusOK {
 			t.Fatalf("SetChatSessionArchived(%v): expected 200, got %d: %s", archived, w.Code, w.Body.String())
 		}
+		var response ChatSessionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode archive response: %v", err)
+		}
+		return response
 	}
 
-	bindingExists := func() bool {
+	bindingState := func() (exists, active bool) {
 		t.Helper()
-		var exists bool
 		if err := testPool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM channel_chat_session_binding WHERE channel_chat_id = $1)`, channelChatID).Scan(&exists); err != nil {
+			`SELECT count(*) > 0, bool_or(retired_at IS NULL) FROM channel_chat_session_binding WHERE channel_chat_id = $1`, channelChatID).Scan(&exists, &active); err != nil {
 			t.Fatalf("query chat session binding: %v", err)
 		}
-		return exists
+		return exists, active
 	}
 
-	// Archive → binding must be gone so future channel traffic cannot revive
-	// this now read-only session.
-	archive(true)
-	if bindingExists() {
-		t.Fatal("archived chat session's channel_chat_session_binding was not cleared")
+	// Archive → the route must stop being current so future channel traffic
+	// cannot revive this now read-only session, but the row must survive: it is
+	// the only thing that still names the external chat this session came from.
+	archivedResponse := archive(true)
+	// The archive response itself must already describe the retired route: other
+	// tabs render the header from it without a refetch.
+	if archivedResponse.ChannelSource == nil ||
+		archivedResponse.ChannelSource.ChannelChatID != channelChatID ||
+		archivedResponse.IsCurrentChannelRoute == nil ||
+		*archivedResponse.IsCurrentChannelRoute {
+		t.Fatalf("archive response channel metadata = %+v / %+v", archivedResponse.ChannelSource, archivedResponse.IsCurrentChannelRoute)
+	}
+	exists, active := bindingState()
+	if !exists {
+		t.Fatal("archiving deleted the channel_chat_session_binding; its route is then unrecoverable and the rebind entry can never come back (MP-70)")
+	}
+	if active {
+		t.Fatal("archived chat session kept an active channel_chat_session_binding; inbound traffic would revive a read-only session")
 	}
 
 	var status string
@@ -879,11 +900,41 @@ VALUES ($1, $2, 'feishu', $3, 'p2p')
 		t.Fatalf("expected chat session status 'archived', got %q", status)
 	}
 
-	// Unarchive → must NOT recreate/steal the binding. A later inbound message
-	// may already have forked a new session that owns the channel now.
+	// The archived Chat must still report its channel source, with the route
+	// marked non-current — that pair is what the header reads to offer rebind.
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID, nil)
+	req.Header.Set("X-User-ID", testUserID)
+	req = withURLParam(req, "sessionId", sessionID)
+	req = withChatTestWorkspaceCtx(t, req)
+	w := httptest.NewRecorder()
+	testHandler.GetChatSession(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetChatSession: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var session ChatSessionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if session.ChannelSource == nil || session.ChannelSource.ChannelChatID != channelChatID {
+		t.Fatalf("archived session lost its channel_source: %+v", session.ChannelSource)
+	}
+	if session.IsCurrentChannelRoute == nil || *session.IsCurrentChannelRoute {
+		t.Fatalf("archived session route current flag = %+v, want false", session.IsCurrentChannelRoute)
+	}
+	if !session.ChannelOrigin {
+		t.Fatal("archived session lost channel_origin; nothing would offer to reattach it")
+	}
+
+	// Unarchive → must NOT reactivate the binding. A later inbound message may
+	// already have forked a new session that owns the channel now; reattaching
+	// is a separate, explicit action.
 	archive(false)
-	if bindingExists() {
-		t.Fatal("unarchive recreated the channel_chat_session_binding; it must not restore or steal the channel")
+	exists, active = bindingState()
+	if !exists {
+		t.Fatal("unarchive dropped the retired channel history")
+	}
+	if active {
+		t.Fatal("unarchive reactivated the channel_chat_session_binding; a later session may already own that channel")
 	}
 }
 

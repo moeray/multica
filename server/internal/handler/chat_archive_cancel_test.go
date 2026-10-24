@@ -1,11 +1,11 @@
 package handler
 
-// chat_archive_cancel_test.go — archiving a chat session deletes its channel
+// chat_archive_cancel_test.go — archiving a chat session retires its channel
 // binding but used to leave queued tasks claimable. ClaimAgentTask does not
 // read chat_session.status, so the daemon still ran the turn: runtime and
 // quota spent on a conversation the user closed, assistant messages written
 // into an archived chat, and the agent flipped back to 'working'. The binding
-// row is already gone by then, so the brief describes the run as a private web
+// is already retired by then, so the brief describes the run as a private web
 // chat, and the outbound senders — which resolve their destination through
 // that same row — have nowhere to deliver the answer.
 //
@@ -65,10 +65,10 @@ func TestArchivingAChannelBoundChatSessionCancelsItsQueuedTasks(t *testing.T) {
 		}
 	}
 
-	// The binding read that gates the cancel happens before the delete; the
-	// delete still has to run, or the channel keeps resolving to this session.
-	if f.bindingExists(t) {
-		t.Errorf("archived session kept its channel_chat_session_binding — inbound traffic would revive a read-only conversation")
+	// The binding read that gates the cancel happens before the retire; the
+	// retire still has to run, or the channel keeps resolving to this session.
+	if f.activeBindingExists(t) {
+		t.Errorf("archived session kept an ACTIVE channel_chat_session_binding — inbound traffic would revive a read-only conversation")
 	}
 
 	// Post-commit lifecycle. Each of these is something BroadcastCancelledTasks
@@ -90,8 +90,9 @@ func TestArchivingAChannelBoundChatSessionCancelsItsQueuedTasks(t *testing.T) {
 // TestArchivingAHistoryOnlyChatSessionCancelsItsQueuedTasks covers the route
 // left behind after a binding switch: the session keeps only retired bindings,
 // but an in-flight task can still be running on that old route. The archive
-// path must still recognize it as channel-backed, cancel the task, and let the
-// existing delete prune the route history.
+// path must still recognize it as channel-backed and cancel the task, and it
+// must leave the retired history alone rather than pruning it (MP-70: that
+// history is what still describes where this Chat came from).
 func TestArchivingAHistoryOnlyChatSessionCancelsItsQueuedTasks(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
@@ -114,8 +115,8 @@ func TestArchivingAHistoryOnlyChatSessionCancelsItsQueuedTasks(t *testing.T) {
 			t.Fatalf("%s task status after archiving a history-only channel session = %q, want cancelled", tc.label, status)
 		}
 	}
-	if f.bindingExists(t) {
-		t.Errorf("archived session kept its retired channel binding history")
+	if f.activeBindingExists(t) {
+		t.Errorf("archived session revived its retired channel binding as an active route")
 	}
 	if agentStatus := f.agentStatus(t); agentStatus != "idle" {
 		t.Errorf("agent status after archiving its only conversation = %q, want idle", agentStatus)
@@ -474,11 +475,11 @@ func (f *archiveCancelFixture) liveTaskTokens(t *testing.T) int {
 	return n
 }
 
-func (f *archiveCancelFixture) bindingExists(t *testing.T) bool {
+func (f *archiveCancelFixture) activeBindingExists(t *testing.T) bool {
 	t.Helper()
 	var exists bool
 	if err := testPool.QueryRow(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM channel_chat_session_binding WHERE chat_session_id = $1)`,
+		`SELECT EXISTS (SELECT 1 FROM channel_chat_session_binding WHERE chat_session_id = $1 AND retired_at IS NULL)`,
 		f.sessionID).Scan(&exists); err != nil {
 		t.Fatalf("query chat session binding: %v", err)
 	}

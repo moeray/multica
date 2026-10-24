@@ -147,6 +147,53 @@ describe("ChatThreadList archive delegation", () => {
     expect(setActiveSession).not.toHaveBeenCalled();
     expect(archiveMutate).not.toHaveBeenCalled();
   });
+
+  it("warns before archiving the Chat that currently receives channel messages", () => {
+    // Archiving retires that route, so the hover click must not be silent.
+    const bound = makeSession({
+      id: "bound",
+      channel_source: {
+        channel_type: "feishu",
+        chat_type: "p2p",
+        installation_id: "installation-1",
+        channel_chat_id: "chat-1",
+        route_revision: 1,
+      },
+      is_current_channel_route: true,
+      channel_origin: true,
+    });
+    const { onArchive } = renderList(null, { renderedSessions: [bound] });
+
+    fireEvent.click(screen.getByRole("button", { name: ARCHIVE_LABEL }));
+
+    expect(onArchive).not.toHaveBeenCalled();
+    expect(screen.getByText(enChat.channel.archive_binding.title)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: enChat.channel.archive_binding.confirm }));
+    expect(onArchive).toHaveBeenCalledTimes(1);
+    expect(onArchive.mock.calls[0]![0]).toMatchObject({ id: "bound" });
+  });
+
+  it("archives a Chat with no current channel route without a confirmation", () => {
+    const retired = makeSession({
+      id: "retired",
+      channel_source: {
+        channel_type: "feishu",
+        chat_type: "p2p",
+        installation_id: "installation-1",
+        channel_chat_id: "chat-1",
+        route_revision: 1,
+      },
+      is_current_channel_route: false,
+      channel_origin: true,
+    });
+    const { onArchive } = renderList(null, { renderedSessions: [retired] });
+
+    fireEvent.click(screen.getByRole("button", { name: ARCHIVE_LABEL }));
+
+    expect(onArchive).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(enChat.channel.archive_binding.title)).not.toBeInTheDocument();
+  });
 });
 
 describe("ChatThreadList no_response preview (MUL-4351)", () => {

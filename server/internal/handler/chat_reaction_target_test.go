@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -43,10 +44,24 @@ func TestChatSessionRemovalCarriesReactionTargetsAfterCommit(t *testing.T) {
 				if e.ChatSessionID != f.sessionID {
 					return
 				}
-				// Observe through the pool, not the transaction: the event must be post-commit.
-				_, err := testHandler.Queries.GetChannelTaskDelivery(context.Background(), parseUUID(e.TaskID))
-				if !errors.Is(err, pgx.ErrNoRows) {
-					t.Errorf("cancel published before delivery deletion committed: %v", err)
+				// Observe through the pool, not the transaction: the event must be
+				// post-commit. Each path's committed state is a different write —
+				// delete removes the delivery rows, while archive retires the
+				// binding and deliberately KEEPS the delivery rows (MP-70), so the
+				// proxy there is the now-retired route.
+				if action == "archive" {
+					_, err := testHandler.Queries.GetChannelChatSessionBinding(context.Background(), db.GetChannelChatSessionBindingParams{
+						InstallationID: parseUUID(installationID),
+						ChannelChatID:  "reaction-room",
+					})
+					if !errors.Is(err, pgx.ErrNoRows) {
+						t.Errorf("cancel published before the route retire committed: %v", err)
+					}
+				} else {
+					_, err := testHandler.Queries.GetChannelTaskDelivery(context.Background(), parseUUID(e.TaskID))
+					if !errors.Is(err, pgx.ErrNoRows) {
+						t.Errorf("cancel published before delivery deletion committed: %v", err)
+					}
 				}
 				seen <- e
 			})

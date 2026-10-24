@@ -39,6 +39,18 @@ WHERE cs.id = $1
     )
   );
 
+-- name: ListChannelIngestedChatSessions :many
+-- Batch projection of durable channel provenance, used to classify Chats whose
+-- binding row no longer exists. channel_ingested is stamped inside the channel
+-- append transaction and never mutated, so it survives archiving and the
+-- binding deletion the pre-MP-70 archive path performed. Without it a Chat whose
+-- binding row was deleted becomes indistinguishable from a first-party Chat and
+-- loses every affordance that could bring its channel route back.
+SELECT DISTINCT chat_session_id
+FROM chat_message
+WHERE chat_session_id = ANY(@chat_session_ids::uuid[])
+  AND channel_ingested;
+
 -- name: ListChatSessionsByCreator :many
 -- IM-style list: each active session with its unread *count* (assistant
 -- messages after the read cursor), a preview of the latest message, and

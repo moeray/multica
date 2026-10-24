@@ -2041,6 +2041,39 @@ func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllC
 	return items, nil
 }
 
+const listChannelIngestedChatSessions = `-- name: ListChannelIngestedChatSessions :many
+SELECT DISTINCT chat_session_id
+FROM chat_message
+WHERE chat_session_id = ANY($1::uuid[])
+  AND channel_ingested
+`
+
+// Batch projection of durable channel provenance, used to classify Chats whose
+// binding row no longer exists. channel_ingested is stamped inside the channel
+// append transaction and never mutated, so it survives archiving and the
+// binding deletion the pre-MP-70 archive path performed. Without it a Chat whose
+// binding row was deleted becomes indistinguishable from a first-party Chat and
+// loses every affordance that could bring its channel route back.
+func (q *Queries) ListChannelIngestedChatSessions(ctx context.Context, chatSessionIds []pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listChannelIngestedChatSessions, chatSessionIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var chat_session_id pgtype.UUID
+		if err := rows.Scan(&chat_session_id); err != nil {
+			return nil, err
+		}
+		items = append(items, chat_session_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listChannelOutboundMessageIDsForContext = `-- name: ListChannelOutboundMessageIDsForContext :many
 SELECT external.message_id::text
 FROM chat_message AS message
