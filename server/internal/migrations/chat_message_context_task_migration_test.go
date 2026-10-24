@@ -53,8 +53,8 @@ func TestChatMessageContextTaskMigration(t *testing.T) {
 		t.Fatalf("create pre-migration chat_message: %v", err)
 	}
 
-	applyMigrationFile(t, ctx, conn.Conn(), "599_chat_message_context_task_id.up.sql")
-	applyMigrationFile(t, ctx, conn.Conn(), "600_chat_message_context_task_index.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "605_chat_message_context_task_id.up.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "606_chat_message_context_task_index.up.sql")
 
 	var columnType string
 	if err := conn.QueryRow(ctx, `
@@ -88,8 +88,8 @@ func TestChatMessageContextTaskMigration(t *testing.T) {
 		t.Fatalf("index missing: %v", err)
 	}
 
-	applyMigrationFile(t, ctx, conn.Conn(), "600_chat_message_context_task_index.down.sql")
-	applyMigrationFile(t, ctx, conn.Conn(), "599_chat_message_context_task_id.down.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "606_chat_message_context_task_index.down.sql")
+	applyMigrationFile(t, ctx, conn.Conn(), "605_chat_message_context_task_id.down.sql")
 	var columns int
 	if err := conn.QueryRow(ctx, `
 		SELECT count(*) FROM information_schema.columns
