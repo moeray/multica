@@ -2170,6 +2170,18 @@ func (s *TaskService) enqueueChatTaskTx(
 	); err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("seal channel chat task input: %w", err)
 	}
+	// Server-authored mirror messages (review results) have no producing turn,
+	// so task_id cannot carry them into the resume context. Stamp them for THIS
+	// turn in the same transaction that creates the task, next to the input
+	// seal above, so the turn either exists with its injected context or not at
+	// all (MP-68).
+	if err := qtx.LinkPendingAgentChatMessagesToTask(
+		ctx, db.LinkPendingAgentChatMessagesToTaskParams{
+			TaskID: task.ID, ChatSessionID: chatSession.ID,
+		},
+	); err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("link pending agent chat messages to task: %w", err)
+	}
 	switch corrected, err := qtx.DeferChatTaskForSealedPendingMedia(ctx, task.ID); {
 	case err == nil:
 		task = corrected
@@ -2455,6 +2467,18 @@ func (s *TaskService) SendDirectChatMessage(
 		task, err = qtx.SetChatTaskInputOwnerSelf(ctx, task.ID)
 		if err != nil {
 			return fmt.Errorf("stamp direct chat input owner: %w", err)
+		}
+		// Mirror messages already in the transcript (a review result written back
+		// into this chat) have no producing turn, so they reach the resuming
+		// session only through the turn they belong to. This send IS that turn:
+		// stamp them before the member's own row exists, so "before this turn"
+		// cannot be confused with "while it was running" (MP-68).
+		if err := qtx.LinkPendingAgentChatMessagesToTask(
+			ctx, db.LinkPendingAgentChatMessagesToTaskParams{
+				TaskID: task.ID, ChatSessionID: session.ID,
+			},
+		); err != nil {
+			return fmt.Errorf("link pending agent chat messages to task: %w", err)
 		}
 		out.Task = task
 
@@ -5113,6 +5137,13 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 					}); err != nil {
 						return fmt.Errorf("copy retry channel delivery: %w", err)
 					}
+					// The clone is the same turn retried, so it reads the same
+					// injected mirror messages (MP-68).
+					if err := qtx.InheritChatContextMessagesForRetryTask(ctx, db.InheritChatContextMessagesForRetryTaskParams{
+						ChildTaskID: child.ID, ParentTaskID: taskID,
+					}); err != nil {
+						return fmt.Errorf("inherit retry chat context messages: %w", err)
+					}
 					retried = &child
 				}
 			case errors.Is(cerr, pgx.ErrNoRows):
@@ -5613,6 +5644,13 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 		ChildTaskID: child.ID, ParentTaskID: parent.ID,
 	}); err != nil {
 		return nil, fmt.Errorf("copy auto-retry channel delivery: %w", err)
+	}
+	// Same turn, retried: the clone reads the same mirror messages its parent
+	// was stamped with (MP-68).
+	if err := qtx.InheritChatContextMessagesForRetryTask(ctx, db.InheritChatContextMessagesForRetryTaskParams{
+		ChildTaskID: child.ID, ParentTaskID: parent.ID,
+	}); err != nil {
+		return nil, fmt.Errorf("inherit auto-retry chat context messages: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("task auto-retry: commit: %w", err)

@@ -141,6 +141,7 @@ type Task struct {
 	ChatInThread                  bool                   `json:"chat_in_thread,omitempty"`                   // true when the latest @mention was a thread reply; selects which read command the prompt tells the agent to start with
 	ChatMessage                   string                 `json:"chat_message,omitempty"`                     // user message content for chat tasks
 	ChatMessageAttachments        []ChatAttachmentMeta   `json:"chat_message_attachments,omitempty"`         // attachments linked to the chat message; agent uses these to `multica attachment download <id>`
+	ChatContextMessages           []ChatContextMessage   `json:"chat_context_messages,omitempty"`            // server-authored messages stamped for this turn; rendered in the per-turn prompt (MP-68)
 	ChatIntro                     bool                   `json:"chat_intro,omitempty"`                       // legacy compatibility for historical is_agent_intro sessions; new agent creation no longer creates these chats
 	RegenerateQuickActionsFor     string                 `json:"regenerate_quick_actions_for,omitempty"`     // set only by servers predating server-side quick-actions generation (MUL-5573). Read as a REFUSAL marker, never executed: see the guard in runTask
 	AutopilotRunID                string                 `json:"autopilot_run_id,omitempty"`                 // non-empty for autopilot run_only tasks
@@ -198,6 +199,18 @@ type ChatAttachmentMeta struct {
 	ID          string `json:"id"`
 	Filename    string `json:"filename"`
 	ContentType string `json:"content_type,omitempty"`
+}
+
+// ChatContextMessage is a server-authored message stamped for this turn but not
+// produced by any turn — today, a review result mirrored back into the chat.
+// The server answers which rows belong to this turn (MP-68); the daemon only
+// renders them, in the per-turn prompt.
+type ChatContextMessage struct {
+	ID           string `json:"id"`
+	MessageKind  string `json:"message_kind,omitempty"`
+	ReviewPassed *bool  `json:"review_passed,omitempty"`
+	Content      string `json:"content"`
+	CreatedAt    string `json:"created_at,omitempty"`
 }
 
 // CoalescedCommentData mirrors the server-side struct (handler.CoalescedCommentData):

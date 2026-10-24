@@ -697,6 +697,57 @@ UPDATE chat_message
 SET task_id = $2
 WHERE id = $1 AND role = 'user';
 
+-- name: LinkPendingAgentChatMessagesToTask :exec
+-- Owns the server-authored assistant rows of this session for exactly one turn:
+-- the next turn created after they landed. task_id cannot answer this — a
+-- mirror message (a review result written back into the chat) has no producing
+-- turn, which is why it was invisible to the resuming session — so
+-- context_task_id records "this turn must read me" separately (MP-68).
+--
+-- The predicate is structural, not a message_kind whitelist: every assistant row
+-- with no task is server-authored and belongs in the context of whatever turn
+-- comes next, so a future mirror kind needs no change here. The one EXCLUSION is
+-- onboarding_opening — the server-written first assistant row of a Mika
+-- onboarding chat. It also has no producing turn, but it is the member's own
+-- opening reply, already in the transcript they read and already quoted by the
+-- kickoff that this turn adopts; injecting it would present Mika's introduction
+-- to herself for a third time. Excluding a known non-mirror is not the same as
+-- enumerating mirrors: anything new is still picked up by default.
+--
+-- created_at < the task's creation is what makes the set deterministic and
+-- bounded: a message that arrives while the turn is already queued or running
+-- belongs to the turn AFTER it, never to this one. context_task_id IS NULL is
+-- what prevents a replay — once stamped, the row is never selected again.
+--
+-- Runs in the caller's transaction, next to LinkUnownedChannelChatMessagesToTask,
+-- so a task row and its injected context commit together.
+UPDATE chat_message AS message
+SET context_task_id = @task_id
+WHERE message.chat_session_id = @chat_session_id
+  AND message.role = 'assistant'
+  AND message.task_id IS NULL
+  AND message.message_kind != 'onboarding_opening'
+  AND message.context_task_id IS NULL
+  AND message.created_at < (SELECT task.created_at FROM agent_task_queue AS task WHERE task.id = @task_id);
+
+-- name: InheritChatContextMessagesForRetryTask :exec
+-- An auto-retry clone is the SAME turn retried, so it must read the same
+-- injected rows its parent would have read. Moving the stamp (rather than
+-- copying it) keeps the one-owner invariant: the failed attempt is dead, and a
+-- row left pointing at it would be injected by nobody (MP-68).
+UPDATE chat_message
+SET context_task_id = @child_task_id
+WHERE context_task_id = @parent_task_id;
+
+-- name: ListChatContextMessagesForTask :many
+-- The mirrored rows this turn must read, in transcript order. Keyed by the
+-- (chat_session_id, context_task_id) index; the session id is redundant to the
+-- answer but turns the lookup into an index probe instead of a scan.
+SELECT * FROM chat_message
+WHERE chat_session_id = @chat_session_id
+  AND context_task_id = @context_task_id
+ORDER BY created_at, id;
+
 -- name: LinkUnownedChannelChatMessagesToTask :exec
 -- Seals the trailing channel-message batch to its task. The task row and these
 -- links are committed together, so an older in-flight task cannot absorb a

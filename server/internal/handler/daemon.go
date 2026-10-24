@@ -3350,6 +3350,42 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		}
 		resp.ChatMessage = strings.Join(parts, "\n\n")
 
+		// Mirrored assistant rows this turn was stamped with at enqueue
+		// (MP-68). They are not part of the input batch — no turn produced
+		// them — so they are read separately and shipped as their own field;
+		// folding them into ChatMessage would present another agent's review
+		// as the member's words. A read failure fails the claim closed like the
+		// input load above: dropping them silently would leave the run with a
+		// hole exactly where the member is likely to point ("刚才那条评审结果").
+		contextMessages, contextErr := h.Queries.ListChatContextMessagesForTask(r.Context(), db.ListChatContextMessagesForTaskParams{
+			ChatSessionID: cs.ID,
+			ContextTaskID: task.ID,
+		})
+		if contextErr != nil {
+			slog.Error("chat claim: load injected context messages failed; preserving task for redelivery",
+				"task_id", uuidToString(task.ID),
+				"chat_session_id", uuidToString(cs.ID),
+				"error", contextErr)
+			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, &claimBuildFailure{
+				outcome: "error_chat_context_load",
+				status:  http.StatusInternalServerError,
+				message: "failed to load chat context messages",
+			}
+		}
+		for _, msg := range contextMessages {
+			entry := ChatContextMessage{
+				ID:          uuidToString(msg.ID),
+				MessageKind: msg.MessageKind,
+				Content:     msg.Content,
+				CreatedAt:   timestampToString(msg.CreatedAt),
+			}
+			if msg.ReviewPassed.Valid {
+				passed := msg.ReviewPassed.Bool
+				entry.ReviewPassed = &passed
+			}
+			resp.ChatContextMessages = append(resp.ChatContextMessages, entry)
+		}
+
 		// Fail closed: a task-owned direct task that resolves to no user text
 		// (and is not the agent's proactive intro) must never dispatch an
 		// empty prompt. The send path creates the owning user message in the
