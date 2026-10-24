@@ -214,6 +214,42 @@ func TestAttachChatSessionChannelBinding_RestoresTheRetiredRoute(t *testing.T) {
 		t.Fatalf("inbound route resolves to %s, want %s", got, fixture.sessionID)
 	}
 
+	// A restored Chat is a real destination again, not just a resolvable one: a
+	// task enqueued on it freezes a delivery to the same external conversation,
+	// which is what the outbound patcher answers into.
+	var restoredBindingID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM channel_chat_session_binding
+		WHERE chat_session_id = $1 AND retired_at IS NULL
+	`, fixture.sessionID).Scan(&restoredBindingID); err != nil {
+		t.Fatalf("read restored binding: %v", err)
+	}
+	restoredSession, err := testHandler.Queries.GetChatSession(ctx, parseUUID(fixture.sessionID))
+	if err != nil {
+		t.Fatalf("reload restored session: %v", err)
+	}
+	task, err := testHandler.TaskService.EnqueueChannelChatTask(
+		ctx,
+		restoredSession,
+		parseUUID(testUserID),
+		false,
+		1,
+		parseUUID(restoredBindingID),
+		2,
+	)
+	if err != nil {
+		t.Fatalf("enqueue channel chat task on restored chat: %v", err)
+	}
+	var deliveryRoute string
+	if err := testPool.QueryRow(ctx, `
+		SELECT channel_chat_id FROM channel_task_delivery WHERE task_id = $1
+	`, uuidToString(task.ID)).Scan(&deliveryRoute); err != nil {
+		t.Fatalf("read task delivery: %v", err)
+	}
+	if deliveryRoute != fixture.channelChatID {
+		t.Fatalf("restored task delivery route = %s, want %s", deliveryRoute, fixture.channelChatID)
+	}
+
 	// Repeating the attach is a successful no-op that does not advance the route.
 	if w := attachChannelBindingRequest(t, testUserID, fixture.sessionID); w.Code != http.StatusOK {
 		t.Fatalf("idempotent attach: expected 200, got %d: %s", w.Code, w.Body.String())
