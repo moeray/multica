@@ -538,6 +538,7 @@ type ChatMessage struct {
 	ActorAgentID                  pgtype.UUID        `json:"actor_agent_id"`
 	ReviewPassed                  pgtype.Bool        `json:"review_passed"`
 	DedupeKey                     pgtype.Text        `json:"dedupe_key"`
+	ContextTaskID                 pgtype.UUID        `json:"context_task_id"`
 }
 
 type ChatPinnedAgent struct {

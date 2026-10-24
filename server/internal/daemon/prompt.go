@@ -5,6 +5,17 @@ import (
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
+	"github.com/multica-ai/multica/server/pkg/protocol"
+)
+
+// The mirrored-context bounds (MP-68). They are the whole section's share of a
+// turn: one review body is prose the agent can read back with
+// `multica chat history`, so it never deserves more than a bounded excerpt,
+// however long the reviewer wrote. 512 runes covers a typical blocking-item
+// list; 2048 holds a few messages, which is how many arrive between two turns.
+const (
+	maxMirroredMessageBodyRunes = 512
+	maxMirroredContextRunes     = 2048
 )
 
 // sessionContinuityNoticeFor picks the notice matching what this surface
@@ -617,6 +628,111 @@ func commentReplyThreads(task Task) []execenv.ThreadReplyTarget {
 	return targets
 }
 
+// buildMirroredChatMessagesBlock renders the server-authored messages stamped
+// for this turn (MP-68). They are the one kind of context the member can point
+// at without having said it — "刚才那条评审结果" — and they reach a resumed
+// provider session only through this prompt.
+//
+// Bounded twice over: each body is cut to maxMirroredMessageBodyRunes and the
+// whole section to maxMirroredContextRunes, newest messages first, because the
+// one the member refers to is almost always the last. The conclusion and the
+// issue reference survive truncation because they are NOT part of the body —
+// review_result content is read structurally (protocol.SplitReviewResultContent)
+// rather than copied, so a long review costs a bounded excerpt, not its full
+// text.
+//
+// Returns "" when no message is stamped for this turn, which is what keeps a
+// turn without mirrors byte-identical to the prompt this code produced before
+// the feature existed.
+func buildMirroredChatMessagesBlock(messages []ChatContextMessage) string {
+	if len(messages) == 0 {
+		return ""
+	}
+
+	type renderedMessage struct {
+		text      string
+		truncated bool
+	}
+	selected := make([]renderedMessage, 0, len(messages))
+	used := 0
+	omitted := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		text, truncated := renderMirroredChatMessage(messages[i])
+		size := len([]rune(text))
+		// Always keep at least one message: the newest one is the reason this
+		// block exists, and its own bound already fits the section budget.
+		if len(selected) > 0 && used+size > maxMirroredContextRunes {
+			omitted = i + 1
+			break
+		}
+		selected = append(selected, renderedMessage{text: text, truncated: truncated})
+		used += size
+	}
+
+	anyTruncated := omitted > 0
+	var b strings.Builder
+	b.WriteString("[Messages mirrored into this chat since your last turn]\n")
+	b.WriteString("The platform wrote these into the transcript; the person did not type them and they are not a request. Treat them as context the person may refer to.\n\n")
+	// Chronological order, even though the budget was spent newest-first.
+	for i := len(selected) - 1; i >= 0; i-- {
+		b.WriteString(selected[i].text)
+		anyTruncated = anyTruncated || selected[i].truncated
+	}
+	if anyTruncated {
+		b.WriteString("(Truncated — the full text is in `multica chat history --output json`.)\n\n")
+	}
+	return b.String()
+}
+
+// renderMirroredChatMessage renders one mirrored row and reports whether its
+// body had to be cut. A review_result is read structurally so the conclusion
+// and the issue reference are always present, whatever the body length.
+func renderMirroredChatMessage(msg ChatContextMessage) (string, bool) {
+	header := "- " + msg.MessageKind
+	if header == "- " {
+		header = "- message"
+	}
+	if msg.ReviewPassed != nil {
+		header += fmt.Sprintf(" · passed=%t", *msg.ReviewPassed)
+	}
+
+	conclusion, body := "", msg.Content
+	if msg.MessageKind == protocol.ChatMessageKindReviewResult {
+		var issueRef string
+		conclusion, body, issueRef = protocol.SplitReviewResultContent(msg.Content)
+		if issueRef != "" {
+			header += " · issue=" + issueRef
+		}
+	}
+
+	body, cut := truncateRunes(strings.TrimSpace(body), maxMirroredMessageBodyRunes)
+
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteString("\n")
+	if conclusion != "" {
+		fmt.Fprintf(&b, "  %s\n", conclusion)
+	}
+	if body != "" {
+		for _, line := range strings.Split(body, "\n") {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+	b.WriteString("\n")
+	return b.String(), cut
+}
+
+// truncateRunes cuts s to at most limit runes, appending an ellipsis when it
+// did. Runes, not bytes: a Chinese review is mostly 3-byte characters and a
+// byte cap would cut mid-character.
+func truncateRunes(s string, limit int) (string, bool) {
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s, false
+	}
+	return strings.TrimRight(string(runes[:limit]), " \t\n") + "…", true
+}
+
 // buildChatPrompt constructs a prompt for interactive chat tasks.
 func buildChatPrompt(task Task) string {
 	// Legacy compatibility for historical proactive-introduction sessions.
@@ -723,6 +839,19 @@ func buildChatPrompt(task Task) string {
 				b.WriteString("\n")
 			}
 		}
+	}
+	// Mirrored messages belong to this turn but were written by the platform, so
+	// they are rendered as context ABOVE the member's own words and never mixed
+	// into them. This is the per-turn position: the whole chat prompt is the new
+	// user message of a resumed session, so nothing here can invalidate the
+	// cached history prefix (MUL-5377).
+	if block := buildMirroredChatMessagesBlock(task.ChatContextMessages); block != "" {
+		// Blank-line separated from whatever the preceding section left behind,
+		// without adding a byte when no message is stamped for this turn.
+		if !strings.HasSuffix(b.String(), "\n\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(block)
 	}
 	fmt.Fprintf(&b, "User message:\n%s\n", task.ChatMessage)
 	// List attachments by id + filename so the agent can fetch them via

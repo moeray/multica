@@ -518,6 +518,7 @@ type AgentTaskResponse struct {
 	ChatInThread             bool                 `json:"chat_in_thread,omitempty"`              // true when the latest @mention was a thread reply; tells the agent to start with `multica chat thread` vs `multica chat history`
 	ChatMessage              string               `json:"chat_message,omitempty"`                // user message for chat tasks
 	ChatMessageAttachments   []ChatAttachmentMeta `json:"chat_message_attachments,omitempty"`    // attachments on the user message — agent calls `multica attachment download <id>` per entry
+	ChatContextMessages      []ChatContextMessage `json:"chat_context_messages,omitempty"`       // server-authored messages stamped for this turn (review results); rendered in the per-turn prompt, never in the cached brief
 	ChatIntro                bool                 `json:"chat_intro,omitempty"`                  // legacy compatibility for historical is_agent_intro sessions; new agent creation no longer creates these chats
 	AutopilotRunID           string               `json:"autopilot_run_id,omitempty"`            // non-empty for autopilot-spawned tasks
 	AutopilotID              string               `json:"autopilot_id,omitempty"`                // autopilot that spawned this task
@@ -732,6 +733,18 @@ type ChatAttachmentMeta struct {
 	ID          string `json:"id"`
 	Filename    string `json:"filename"`
 	ContentType string `json:"content_type,omitempty"`
+}
+
+// ChatContextMessage is one server-authored message this turn must read even
+// though no turn produced it (a review result mirrored back into the chat).
+// Shipped on the claim so the prompt can render it structurally; the daemon
+// never has to fetch the transcript itself (MP-68).
+type ChatContextMessage struct {
+	ID           string `json:"id"`
+	MessageKind  string `json:"message_kind,omitempty"`
+	ReviewPassed *bool  `json:"review_passed,omitempty"`
+	Content      string `json:"content"`
+	CreatedAt    string `json:"created_at,omitempty"`
 }
 
 // CoalescedCommentData carries the full detail of a comment that was folded

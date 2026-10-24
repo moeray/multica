@@ -217,10 +217,6 @@ func (s *AgentMessageService) reviewResultContent(ctx context.Context, req Revie
 		return "", fmt.Errorf("load reviewer comment: %w", err)
 	}
 
-	verdict := "通过"
-	if !req.Passed {
-		verdict = "不通过"
-	}
 	body := strings.TrimSpace(comment.Content)
 	if body == "" {
 		body = "评审结论已记录在 issue 中。"
@@ -235,12 +231,11 @@ func (s *AgentMessageService) reviewResultContent(ctx context.Context, req Revie
 		}
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "评审结果：%s\n\n", verdict)
-	b.WriteString(body)
-	b.WriteString("\n\n")
-	b.WriteString(link)
-	return b.String(), nil
+	// The section layout is shared with the daemon's per-turn injection, which
+	// reads the conclusion and the issue reference back out of this body
+	// (MP-68). Building it here rather than assembling the string keeps the two
+	// sides from drifting.
+	return protocol.BuildReviewResultContent(req.Passed, body, link), nil
 }
 
 func (s *AgentMessageService) send(

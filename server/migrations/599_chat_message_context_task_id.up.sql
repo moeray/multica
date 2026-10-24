@@ -1,0 +1,15 @@
+-- chat_message.task_id answers "which turn produced this row". A server-authored
+-- mirror message (a review result written back into the source chat) has no
+-- producing turn — task_id is NULL — which made it invisible to the provider
+-- session the next chat turn resumes: it exists in the transcript and in the UI,
+-- but not in the context the assistant reads.
+--
+-- context_task_id is the second, independent question: "which turn must READ
+-- this row". It is stamped when that turn is created, so the injection set is
+-- decided once, deterministically, and a row can never be picked up by a later
+-- turn (MP-68).
+--
+-- Deliberately no foreign key: agent_task_queue rows are reaped independently of
+-- the transcript, and a stale id must neither block that reaping nor delete the
+-- message.
+ALTER TABLE chat_message ADD COLUMN IF NOT EXISTS context_task_id UUID;
