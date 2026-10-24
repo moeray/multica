@@ -35,6 +35,7 @@ WHERE cs.id = $1
       SELECT 1 FROM chat_message AS public_message
       WHERE public_message.chat_session_id = cs.id
         AND public_message.message_kind != 'channel_command'
+        AND public_message.message_kind != 'autopilot_kickoff'
     )
   );
 
@@ -57,7 +58,7 @@ LEFT JOIN LATERAL (
   SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
-     AND m.message_kind != 'channel_command'
+     AND m.message_kind NOT IN ('channel_command', 'autopilot_kickoff')
    ORDER BY m.created_at DESC
    LIMIT 1
 ) lm ON true
@@ -94,7 +95,7 @@ LEFT JOIN LATERAL (
   SELECT content, role, created_at, failure_reason, message_kind
     FROM chat_message m
    WHERE m.chat_session_id = cs.id
-     AND m.message_kind != 'channel_command'
+     AND m.message_kind NOT IN ('channel_command', 'autopilot_kickoff')
    ORDER BY m.created_at DESC
    LIMIT 1
 ) lm ON true
@@ -187,6 +188,7 @@ WHERE session.id = @id
     WHERE message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
 RETURNING *;
 
@@ -204,6 +206,7 @@ WHERE session.id = @id
     WHERE message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
 RETURNING *;
 
@@ -218,12 +221,14 @@ WHERE session.id = @id
       AND message.chat_session_id = session.id
       AND message.role = 'user'
       AND message.message_kind != 'channel_command'
+      AND message.message_kind != 'autopilot_kickoff'
   )
   AND NOT EXISTS (
     SELECT 1 FROM chat_message AS other_message
     WHERE other_message.chat_session_id = session.id
       AND other_message.role = 'user'
       AND other_message.message_kind != 'channel_command'
+      AND other_message.message_kind != 'autopilot_kickoff'
       AND other_message.id != @message_id
   )
 RETURNING *;
@@ -485,7 +490,7 @@ WHERE id = $1;
 INSERT INTO chat_message (
     chat_session_id, role, content, task_id, failure_reason, elapsed_ms,
     message_kind, quick_actions, channel_media_pending_until, channel_ingested,
-    channel_context_revision, id
+    channel_context_revision, actor_agent_id, review_passed, dedupe_key, id
 )
 VALUES (
     $1, $2, $3, sqlc.narg(task_id), sqlc.narg(failure_reason), sqlc.narg(elapsed_ms),
@@ -501,9 +506,32 @@ VALUES (
          ELSE now() + make_interval(secs => sqlc.narg(channel_media_pending_secs)::float8) END,
     COALESCE(sqlc.narg(channel_ingested)::boolean, FALSE),
     sqlc.narg(channel_context_revision),
+    sqlc.narg(actor_agent_id),
+    sqlc.narg(review_passed),
+    sqlc.narg(dedupe_key),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 )
 RETURNING *;
+
+-- name: CreateAgentChatMessage :one
+-- Idempotent insert for server-authored agent messages. The partial unique
+-- index on (chat_session_id, dedupe_key) makes a retried producer return no
+-- row here; callers then read the existing row with GetChatMessageByDedupeKey.
+INSERT INTO chat_message (
+    chat_session_id, role, content, task_id, message_kind, actor_agent_id,
+    review_passed, dedupe_key, id
+)
+VALUES (
+    $1, $2, $3, sqlc.narg(task_id), $4, sqlc.narg(actor_agent_id),
+    sqlc.narg(review_passed), $5, COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+)
+ON CONFLICT (chat_session_id, dedupe_key) WHERE dedupe_key IS NOT NULL
+DO NOTHING
+RETURNING *;
+
+-- name: GetChatMessageByDedupeKey :one
+SELECT * FROM chat_message
+WHERE chat_session_id = $1 AND dedupe_key = $2;
 
 -- name: TaskHasChannelIngestedMessages :one
 -- Immutable channel provenance for a task's user-message input batch:
@@ -775,10 +803,14 @@ RETURNING task.*;
 -- member the product's internal prompt as their restored draft, and silently
 -- drop what they actually typed. Callers release the kickoff separately
 -- (ReleaseOnboardingKickoffFromTask) so the next send re-adopts it.
+--
+-- autopilot_kickoff is the same hazard for message-mode autopilot tasks: it is
+-- server-authored context, never the member's draft. Cancelling or editing such
+-- a queued task must leave it in place rather than restore the internal prompt.
 DELETE FROM chat_message
 WHERE task_id = $1
   AND role = 'user'
-  AND message_kind <> 'onboarding_kickoff'
+  AND message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
 RETURNING *;
 
 -- name: ReleaseOnboardingKickoffFromTask :exec
@@ -837,6 +869,7 @@ WHERE task_id = $1
 SELECT message.* FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
+  AND message.message_kind != 'autopilot_kickoff'
   AND NOT (
     message.role = 'user'
     AND EXISTS (
@@ -1024,7 +1057,7 @@ WITH latest_visible AS (
       -- moving it to dispatch time reverses that, and because the batch's two
       -- rows would then share one timestamp, their order falls to random UUIDs
       -- (MUL-5827).
-      AND claimed_input.message_kind <> 'onboarding_kickoff'
+      AND claimed_input.message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
 )
 UPDATE chat_message AS claimed_input
 SET created_at = GREATEST(
@@ -1053,7 +1086,7 @@ WHERE queued_input.chat_session_id = $1
   -- Same exclusion, same reason as ReanchorClaimedDirectChatInput: the hidden
   -- kickoff has no visible position to fix, and moving it would put the
   -- product's context after the member's message inside one input batch.
-  AND queued_input.message_kind <> 'onboarding_kickoff'
+  AND queued_input.message_kind NOT IN ('onboarding_kickoff', 'autopilot_kickoff')
   AND queued_input.created_at <= sqlc.arg('assistant_created_at')::timestamptz
   AND EXISTS (
     SELECT 1
@@ -1086,6 +1119,7 @@ WHERE queued_input.chat_session_id = $1
 SELECT message.* FROM chat_message AS message
 WHERE message.chat_session_id = $1
   AND message.message_kind != 'channel_command'
+  AND message.message_kind != 'autopilot_kickoff'
   AND NOT (
     message.role = 'user'
     AND EXISTS (
@@ -1383,6 +1417,7 @@ LEFT JOIN LATERAL (
     FROM chat_message AS input
     WHERE input.task_id = COALESCE(task.chat_input_task_id, task.id)
       AND input.role = 'user'
+      AND input.message_kind <> 'autopilot_kickoff'
     ORDER BY input.created_at ASC, input.id ASC
     LIMIT 1
 ) AS message ON TRUE
@@ -1507,7 +1542,9 @@ WHERE id = $1;
 -- instead of repeating the introduction every turn (MUL-4259).
 SELECT EXISTS (
     SELECT 1 FROM chat_message
-    WHERE chat_session_id = $1 AND role = 'user'
+    WHERE chat_session_id = $1
+      AND role = 'user'
+      AND message_kind != 'autopilot_kickoff'
 ) AS has_user_message;
 
 -- name: ChatSessionHasPublicUserMessage :one
@@ -1516,6 +1553,7 @@ SELECT EXISTS (
     WHERE chat_session_id = $1
       AND role = 'user'
       AND message_kind != 'channel_command'
+      AND message_kind != 'autopilot_kickoff'
 ) AS has_public_user_message;
 
 -- name: CreateChatDraftRestore :one

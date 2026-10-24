@@ -202,6 +202,7 @@ type ChannelChatStartedEvent struct {
 	SessionID      pgtype.UUID
 	InstallationID pgtype.UUID
 	ChannelType    channel.Type
+	ChatType       channel.ChatType
 	RouteRevision  int64
 	Title          string
 }

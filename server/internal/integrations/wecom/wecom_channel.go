@@ -556,38 +556,24 @@ func (c *wecomChannel) pingLoop(ctx context.Context, sender *wsSender, log *slog
 	}
 }
 
-// Send is the outbound Channel entry the engine calls with a normalized
-// OutboundMessage. Iteration 1 always uses aibot_send_msg (WeCom's
-// "proactive push" cmd) rather than aibot_respond_msg — send_msg has no 5s
-// deadline and works regardless of whether the message ever ties back to a
-// specific inbound frame. The one caveat is chat_type: aibot_send_msg needs
-// to know whether the ChatID is a single-user id or a group id. We piggy-
-// back on the length heuristic used by internal-customer-service (chat ids
-// are ≥33 chars, userids are shorter), which is stable in practice.
-//
-// The Channel is not the primary outbound path in the multica engine — the
-// EventChatDone subscriber and the OutboundReplier handle most sends — but
-// Channel.Send is still the contract that lets the engine deliver ad-hoc
-// replies, so we implement it here for parity with feishuChannel /
-// slackChannel.
+// Send is the outbound Channel entry for ad-hoc messages (for example a
+// server-authored review result). It uses the live aibot socket and the
+// explicit ChatType carried by OutboundMessage; an empty ChatType is rejected
+// rather than guessed from the ChatID.
 func (c *wecomChannel) Send(ctx context.Context, out channel.OutboundMessage) (channel.SendResult, error) {
-	// Not used. Outbound for wecom goes through OutboundReplier / Outbound
-	// (EventChatDone + EventInboxNew), which know the message's real
-	// Source.ChatType and address the correct chat. The generic
-	// Channel.Send seam is never invoked by the engine for this channel; a
-	// stub here previously guessed single-vs-group from len(ChatID) > 32,
-	// the only chat-type inference in the package. Return not-supported
-	// rather than keep a second, heuristic outbound path alive.
-	_ = ctx
-	_ = out
-	return channel.SendResult{}, ErrSendNotSupported
+	if c.senders == nil || out.ChatType == "" {
+		return channel.SendResult{}, ErrSendNotSupported
+	}
+	chatType := aibotChatTypeFromChannel(channel.ChatType(out.ChatType))
+	if err := c.senders.sendTextCtx(ctx, c.installationID, out.ChatID, chatType, out.Text); err != nil {
+		return channel.SendResult{}, err
+	}
+	return channel.SendResult{}, nil
 }
 
-// ErrSendNotSupported is returned by wecomChannel.Send. WeCom's generic
-// Channel.Send seam has no honest implementation — channel.OutboundMessage
-// carries no chat_type, and outbound already flows through OutboundReplier /
-// Outbound, which read the chat type off the inbound frame.
-var ErrSendNotSupported = errors.New("wecom: Channel.Send is not supported; outbound goes through OutboundReplier/Outbound")
+// ErrSendNotSupported is returned when no live aibot sender is registered or
+// the caller did not supply an explicit ChatType.
+var ErrSendNotSupported = errors.New("wecom: no live aibot sender is registered")
 
 // ---- factory ----
 

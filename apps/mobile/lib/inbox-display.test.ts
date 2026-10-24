@@ -98,6 +98,19 @@ describe("getInboxNavigationTarget", () => {
     });
   });
 
+  it("opens issue-less agent messages so fallback reports stay readable", () => {
+    expect(
+      getInboxNavigationTarget(
+        item({ issue_id: null, type: "agent_message" }),
+        "acme",
+        "history-1",
+      ),
+    ).toEqual({
+      pathname: "/[workspace]/inbox/[id]",
+      params: { workspace: "acme", id: "inbox-1" },
+    });
+  });
+
   it("preserves issue navigation and opens paused notices in the same sheet", () => {
     expect(
       getInboxNavigationTarget(item({}), "acme", "history-1"),

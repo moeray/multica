@@ -3749,6 +3749,19 @@ export class ApiClient {
     });
   }
 
+  async switchChatSessionChannelBinding(
+    id: string,
+    data: { installation_id: string; channel_chat_id: string },
+  ): Promise<ChatSession> {
+    const raw: unknown = await this.fetch(`/api/chat/sessions/${id}/channel-binding`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChatSessionSchema, EMPTY_CHAT_SESSION, {
+      endpoint: "PUT /api/chat/sessions/:id/channel-binding",
+    });
+  }
+
   // Quick-agent bar: per-user pinned agents.
   async listChatPinnedAgents(): Promise<ChatPinnedAgent[]> {
     return this.fetch("/api/chat/pinned-agents");

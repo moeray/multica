@@ -255,6 +255,9 @@ type ChatMessagePayload struct {
 	Content       string `json:"content"`
 	TaskID        string `json:"task_id,omitempty"`
 	CreatedAt     string `json:"created_at"`
+	MessageKind   string `json:"message_kind,omitempty"`
+	ActorAgentID  string `json:"actor_agent_id,omitempty"`
+	ReviewPassed  *bool  `json:"review_passed,omitempty"`
 }
 
 // Chat message kinds (chat_message.message_kind). Additive: unknown values
@@ -276,6 +279,19 @@ const (
 	// the opening self-describes: chat renders the starter cards under this
 	// kind instead of quick-action chips (MUL-5765).
 	ChatMessageKindOnboardingOpening = "onboarding_opening"
+	// ChatMessageKindAutopilotKickoff is the hidden server-authored user turn
+	// that starts a message-mode autopilot run inside an existing chat. It is
+	// persisted so the runtime receives a normal immutable input batch, but UI
+	// projections filter it out: it is not the member's message, must not
+	// affect unread counts, and must not become the chat-list preview.
+	ChatMessageKindAutopilotKickoff = "autopilot_kickoff"
+	// ChatMessageKindAgentReport marks an assistant reply produced by a
+	// message-mode autopilot run. It renders like an ordinary reply and stays
+	// in the transcript so the member can follow up on it.
+	ChatMessageKindAgentReport = "agent_report"
+	// ChatMessageKindReviewResult marks a server-authored assistant message
+	// carrying a reviewer's final conclusion back into the source chat.
+	ChatMessageKindReviewResult = "review_result"
 )
 
 // ChatDonePayload is broadcast when an agent finishes responding to a chat
@@ -363,7 +379,9 @@ type ChatSessionCreatedPayload struct {
 
 type ChatSessionChannelSource struct {
 	ChannelType    string `json:"channel_type"`
+	ChatType       string `json:"chat_type,omitempty"`
 	InstallationID string `json:"installation_id"`
+	ChannelChatID  string `json:"channel_chat_id,omitempty"`
 	RouteRevision  int64  `json:"route_revision"`
 }
 
@@ -389,8 +407,12 @@ type ChatSessionUpdatedPayload struct {
 	Pinned *bool `json:"pinned,omitempty"`
 	// Status is set only by the archive/unarchive path ("active"/"archived");
 	// nil on rename/pin so a receiver leaves the existing status untouched.
-	Status    *string `json:"status,omitempty"`
-	UpdatedAt string  `json:"updated_at"`
+	Status *string `json:"status,omitempty"`
+	// ChannelSource and IsCurrentChannelRoute are set only by a route switch.
+	// A nil field leaves the receiver's cached channel metadata untouched.
+	ChannelSource         *ChatSessionChannelSource `json:"channel_source,omitempty"`
+	IsCurrentChannelRoute *bool                     `json:"is_current_channel_route,omitempty"`
+	UpdatedAt             string                    `json:"updated_at"`
 }
 
 // DaemonHeartbeatRequestPayload is sent from daemon to server over WebSocket

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
+	"github.com/multica-ai/multica/server/internal/util"
 )
 
 func testChannel(handler channel.InboundHandler) *wecomChannel {
@@ -134,5 +135,33 @@ func TestSend_NeverGuessesChatType(t *testing.T) {
 		if !errors.Is(err, ErrSendNotSupported) {
 			t.Errorf("Send(ChatID=%q) = %v, want ErrSendNotSupported (no length heuristic)", chatID, err)
 		}
+	}
+}
+
+func TestSend_UsesExplicitChatType(t *testing.T) {
+	c := testChannel(nil)
+	c.installationID = util.MustParseUUID("11111111-1111-4111-8111-111111111111")
+	conn := &recordingConn{}
+	sender := conn.autoAck(newWSSender(conn, nil))
+	c.senders = newSendersRegistry()
+	c.senders.set(c.installationID, sender)
+
+	if _, err := c.Send(context.Background(), channel.OutboundMessage{
+		ChatID: "ROOM_1", ChatType: string(channel.ChatTypeGroup), Text: "review result",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if len(conn.frames) != 1 || conn.frames[0].Cmd != cmdSendMsg {
+		t.Fatalf("frames = %+v, want one aibot_send_msg", conn.frames)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(conn.frames[0].Body, &body); err != nil {
+		t.Fatalf("decode send body: %v", err)
+	}
+	if body["chatid"] != "ROOM_1" || body["chat_type"] != float64(chatTypeGroupInt) {
+		t.Fatalf("send body = %#v, want group chat type", body)
 	}
 }

@@ -3406,6 +3406,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 
 		resp.AutopilotID = uuidToString(run.AutopilotID)
 		resp.AutopilotSource = run.Source
+		resp.AutopilotExecutionMode = ap.ExecutionMode
 		if run.TriggerPayload != nil {
 			resp.AutopilotTriggerPayload = json.RawMessage(run.TriggerPayload)
 		}

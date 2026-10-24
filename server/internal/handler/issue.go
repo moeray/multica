@@ -4087,6 +4087,12 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 	statusChanged := (req.Status != nil || params.Status.Valid) && prevIssue.Status != issue.Status
 	priorityChanged := req.Priority != nil && prevIssue.Priority != issue.Priority
+	reviewDispatch := reviewResultDispatch{}
+	if statusChanged {
+		dispatchCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+		reviewDispatch = h.dispatchReviewResult(dispatchCtx, prevIssue, issue, actorType, actorID)
+		cancel()
+	}
 	// project_changed gates the client's per-project issue-list refetch the way
 	// status/assignee flags gate theirs. Without it the client must diff
 	// project_id against its own cache, which breaks once an optimistic local
@@ -4141,8 +4147,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		"creator_id":          uuidToString(prevIssue.CreatorID),
 		// Both ends of a mark change ride here: the activity log records it
 		// and clients refresh the two issues' relations from it.
-		"duplicate_of_issue_id":      liveDuplicateMark(issue.Status, issue.DuplicateOfIssueID),
-		"prev_duplicate_of_issue_id": liveDuplicateMark(prevIssue.Status, prevIssue.DuplicateOfIssueID),
+		"duplicate_of_issue_id":        liveDuplicateMark(issue.Status, issue.DuplicateOfIssueID),
+		"prev_duplicate_of_issue_id":   liveDuplicateMark(prevIssue.Status, prevIssue.DuplicateOfIssueID),
+		"suppress_status_notification": reviewDispatch.SuppressStatusNotification,
+		"review_result_delivered":      reviewDispatch.Delivered,
 	}
 	if handoff != nil {
 		updatedPayload["workflow_handoff"] = workflowHandoffPayload(issue, handoff, h.workflowHandoffBrief(r.Context(), issue, handoff), willRun)

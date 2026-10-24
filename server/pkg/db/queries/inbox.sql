@@ -105,6 +105,27 @@ WHERE ($2::text = 'member' AND EXISTS (
 ))
 RETURNING *;
 
+-- name: CreateAutopilotReportInboxItem :one
+-- Fallback delivery for a message-mode autopilot whose recipient has no bound
+-- conversation. The dedupe key is scoped to the run so a retried completion or
+-- a replayed event cannot enqueue a second notification.
+INSERT INTO inbox_item (
+    workspace_id, recipient_type, recipient_id, type, severity, issue_id,
+    title, body, actor_type, actor_id, details,
+    chat_session_id, chat_message_id, dedupe_key, id
+)
+SELECT
+    $1, 'member', $2, 'agent_message', 'info', NULL,
+    $3, $4, 'agent', $5, $6,
+    sqlc.narg(chat_session_id), sqlc.narg(chat_message_id), $7,
+    COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+WHERE EXISTS (
+    SELECT 1 FROM member WHERE workspace_id = $1 AND user_id = $2
+)
+ON CONFLICT (workspace_id, dedupe_key) WHERE dedupe_key IS NOT NULL
+DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
+RETURNING *;
+
 -- name: MarkInboxRead :one
 UPDATE inbox_item SET read = true
 WHERE id = $1

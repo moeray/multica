@@ -7,6 +7,7 @@ import { Virtuoso, type Components, type VirtuosoHandle } from "react-virtuoso";
 import { cn } from "@multica/ui/lib/utils";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Button } from "@multica/ui/components/ui/button";
+import { Badge } from "@multica/ui/components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
@@ -26,6 +27,8 @@ import {
   ArrowUpRight,
   Copy,
   RotateCw,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
 import { useScrollFade } from "@multica/ui/hooks/use-scroll-fade";
 import { isTaskMessageTaskId, taskMessagesOptions } from "@multica/core/chat/queries";
@@ -264,7 +267,11 @@ export function ChatMessageList({
   // a visible bubble.
   const renderItems: ChatRenderItem[] = useMemo(() => {
     const items: ChatRenderItem[] = messages
-      .filter((message) => message.message_kind !== "onboarding_kickoff")
+      .filter(
+        (message) =>
+          message.message_kind !== "onboarding_kickoff" &&
+          message.message_kind !== "autopilot_kickoff",
+      )
       .map((message) => ({
         key: messageRowKey(message),
         kind: "message" as const,
@@ -614,6 +621,10 @@ function AssistantMessage({
 
   return (
     <div className="w-full space-y-1.5">
+      {message?.message_kind === "review_result" &&
+      message.review_passed != null ? (
+        <ReviewResultBadge passed={message.review_passed} />
+      ) : null}
       {timeline.length > 0 && (
         <TimelineView
           items={timeline}
@@ -855,6 +866,28 @@ function NoResponseNotice() {
     <div className="text-body italic text-muted-foreground">
       {t(($) => $.message_list.no_response)}
     </div>
+  );
+}
+
+function ReviewResultBadge({ passed }: { passed: boolean }) {
+  const { t } = useT("chat");
+  const Icon = passed ? CheckCircle2 : XCircle;
+  return (
+    <Badge
+      variant="outline"
+      className={
+        passed
+          ? "border-success/30 bg-success/10 text-success"
+          : "border-destructive/30 bg-destructive/10 text-destructive"
+      }
+    >
+      <Icon aria-hidden="true" />
+      {t(($) =>
+        passed
+          ? $.message_list.review_result_passed
+          : $.message_list.review_result_failed,
+      )}
+    </Badge>
   );
 }
 

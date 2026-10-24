@@ -181,10 +181,10 @@ export function refetchPendingChatAggregate(
  * chat:quick_actions cancel. Both caches are staleTime: Infinity, so nothing
  * re-fetched afterwards and the prompt stayed missing until a remount.
  *
- * Only `role: "user"` is written. SendChatMessage is the event's one producer,
- * and an assistant row fabricated from this payload would carry no elapsed_ms /
- * message_kind / quick_actions while still claiming the id that
- * applyChatDoneToCache is about to write properly.
+ * User messages are written here. A server-authored review_result assistant
+ * message is also written because it has no task lifecycle and therefore never
+ * arrives through chat:done; the payload carries the full row fields the
+ * renderer needs. Ordinary assistant rows still arrive through chat:done.
  *
  * The invalidate stays: this payload has no `attachments`, so the reconciling
  * refetch is what fills them in for clients that did not send the message.
@@ -202,6 +202,22 @@ export function applyChatMessageToCache(
       content: payload.content ?? "",
       task_id: payload.task_id ?? null,
       created_at: payload.created_at ?? new Date().toISOString(),
+    });
+  } else if (
+    payload.role === "assistant" &&
+    payload.message_id &&
+    payload.message_kind === "review_result"
+  ) {
+    upsertChatMessageToCaches(qc, sessionId, {
+      id: payload.message_id,
+      chat_session_id: sessionId,
+      role: "assistant",
+      content: payload.content ?? "",
+      task_id: payload.task_id ?? null,
+      created_at: payload.created_at ?? new Date().toISOString(),
+      message_kind: payload.message_kind,
+      actor_agent_id: payload.actor_agent_id ?? null,
+      review_passed: payload.review_passed ?? null,
     });
   }
   invalidateChatMessageQueries(qc, sessionId);
@@ -349,6 +365,8 @@ type ChatSessionUpdatedPayload = {
   project_id?: string | null;
   pinned?: boolean;
   status?: "active" | "archived";
+  channel_source?: ChatSessionCreatedPayload["channel_source"];
+  is_current_channel_route?: boolean;
   updated_at?: string;
 };
 
@@ -384,6 +402,12 @@ export function applyChatSessionUpdatedToCache(
             ...("project_id" in payload ? { project_id: payload.project_id } : {}),
             pinned: payload.pinned ?? s.pinned,
             status: payload.status ?? s.status,
+            ...(payload.channel_source !== undefined
+              ? { channel_source: payload.channel_source }
+              : {}),
+            ...(payload.is_current_channel_route !== undefined
+              ? { is_current_channel_route: payload.is_current_channel_route }
+              : {}),
             updated_at: payload.updated_at ?? s.updated_at,
             ...(payload.status === "archived"
               ? { unread_count: 0, has_unread: false }

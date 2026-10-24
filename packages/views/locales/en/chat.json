@@ -54,6 +54,8 @@
     "failed_after": "Failed after {{elapsed}}",
     "finished_in": "Finished in {{elapsed}}",
     "no_response": "The agent finished this turn without a text reply.",
+    "review_result_passed": "Review passed",
+    "review_result_failed": "Review failed",
     "failure": {
       "agent_error": "The agent ran into an error and couldn't finish replying. Please try again.",
       "timeout": "The agent took too long and stopped before finishing. Try again, or break your request into smaller steps.",
@@ -244,6 +246,27 @@
     "unarchive": "Unarchive",
     "archived_title": "Archived",
     "row_actions_aria": "Chat actions"
+  },
+  "channel": {
+    "feishu": "Feishu",
+    "current": "Current",
+    "historical": "Historical",
+    "current_binding": "Current binding",
+    "historical_session": "Historical session",
+    "change_binding": "Change bound chat",
+    "binding_dialog": {
+      "description": "New Feishu messages will go to the chat you choose. This chat stays available as history, and replies already in progress keep their original route.",
+      "list_aria": "Active chats for this agent",
+      "conflict": "Already bound",
+      "empty": "No other active chats for this agent.",
+      "cancel": "Cancel",
+      "confirm": "Switch binding",
+      "switching": "Switching...",
+      "conflict_error": "That chat already has an active binding, or the Feishu route just changed. Try again.",
+      "forbidden_error": "You can't change this Feishu binding.",
+      "not_found_error": "That chat is no longer available.",
+      "generic_error": "Couldn't change the binding. Try again."
+    }
   },
   "header": {
     "view_profile": "View agent profile",

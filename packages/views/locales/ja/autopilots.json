@@ -32,7 +32,8 @@
   },
   "execution_mode": {
     "create_issue": "タスクを作成",
-    "run_only": "実行のみ"
+    "run_only": "実行のみ",
+    "message": "メッセージ"
   },
   "relative_date": {
     "today": "今日",
@@ -339,6 +340,10 @@
       "run_only": {
         "label": "実行のみ",
         "description": "タスクを作成せず、静かに実行します"
+      },
+      "message": {
+        "label": "メッセージ",
+        "description": "各実行の結果をエージェントのチャットに送信します"
       }
     }
   },

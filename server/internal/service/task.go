@@ -2034,7 +2034,21 @@ func (s *TaskService) enqueueChatTaskTx(
 		return db.AgentTaskQueue{}, ErrChatTaskAgentNoRuntime
 	}
 
-	binding, bindingErr := qtx.LockChannelChatSessionBindingForContext(ctx, chatSession.ID)
+	var (
+		binding    db.ChannelChatSessionBinding
+		bindingErr error
+	)
+	if expectedBindingID.Valid {
+		// The debounced flush carries the route that produced its sealed input.
+		// That route may already be retired by /new or an explicit binding
+		// switch; lock it by id instead of only looking for the new active row.
+		binding, bindingErr = qtx.LockChannelChatSessionBindingForTask(ctx, db.LockChannelChatSessionBindingForTaskParams{
+			ChatSessionID: chatSession.ID,
+			BindingID:     expectedBindingID,
+		})
+	} else {
+		binding, bindingErr = qtx.LockChannelChatSessionBindingForContext(ctx, chatSession.ID)
+	}
 	if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
 		return db.AgentTaskQueue{}, fmt.Errorf("lock channel chat binding: %w", bindingErr)
 	}
@@ -2114,7 +2128,7 @@ func (s *TaskService) enqueueChatTaskTx(
 		if _, err := qtx.CreateChannelTaskDeliveryFromSession(
 			ctx, db.CreateChannelTaskDeliveryFromSessionParams{
 				TaskID: task.ID, ChatSessionID: chatSession.ID,
-				ContextRevision: contextRevision,
+				BindingID: binding.ID, ContextRevision: contextRevision,
 			},
 		); err != nil {
 			return db.AgentTaskQueue{}, fmt.Errorf("snapshot channel task delivery: %w", err)
@@ -4736,7 +4750,12 @@ func (s *TaskService) writeChatCompletionOutcome(ctx context.Context, qtx *db.Qu
 		if err != nil {
 			return nil, fmt.Errorf("check onboarding kickoff input: %w", err)
 		}
-		if openingOnly.Bool {
+		if task.AutopilotRunID.Valid {
+			// Message-mode autopilot replies are ordinary assistant turns, but
+			// the kind lets clients fold/filter scheduled reports and lets the
+			// run's result point at the row.
+			params.MessageKind = pgtype.Text{String: protocol.ChatMessageKindAgentReport, Valid: true}
+		} else if openingOnly.Bool {
 			params.MessageKind = pgtype.Text{String: protocol.ChatMessageKindOnboardingOpening, Valid: true}
 		}
 	case pendingAttachments > 0:

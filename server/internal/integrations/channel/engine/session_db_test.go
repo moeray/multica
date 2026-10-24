@@ -49,6 +49,7 @@ type sessionPersistenceFixture struct {
 	agentID        pgtype.UUID
 	sessionID      pgtype.UUID
 	installationID pgtype.UUID
+	bindingID      pgtype.UUID
 	channelChatID  string
 }
 
@@ -64,12 +65,14 @@ func seedSessionPersistenceFixture(t *testing.T, pool *pgxpool.Pool) sessionPers
 		t.Fatalf("create channel installation: %v", err)
 	}
 	f.channelChatID = "channel-media-" + fmt.Sprint(time.Now().UnixNano())
-	if _, err := db.New(pool).CreateChannelChatSessionBinding(ctx, db.CreateChannelChatSessionBindingParams{
+	binding, err := db.New(pool).CreateChannelChatSessionBinding(ctx, db.CreateChannelChatSessionBindingParams{
 		ChatSessionID: f.sessionID, InstallationID: f.installationID, ChannelType: "lark",
 		ChannelChatID: f.channelChatID, ChatType: "p2p", Config: []byte("{}"),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create channel binding: %v", err)
 	}
+	f.bindingID = binding.ID
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `
 			DELETE FROM channel_chat_context_generation
@@ -1245,7 +1248,7 @@ func TestChannelTaskDeliveryFreezesTriggerPerGeneration(t *testing.T) {
 	} {
 		taskID := newDeliveryTaskID(t, pool)
 		delivery, err := q.CreateChannelTaskDeliveryFromSession(ctx, db.CreateChannelTaskDeliveryFromSessionParams{
-			TaskID: taskID, ChatSessionID: f.sessionID, ContextRevision: tc.revision,
+			TaskID: taskID, ChatSessionID: f.sessionID, BindingID: f.bindingID, ContextRevision: tc.revision,
 		})
 		if err != nil {
 			t.Fatalf("%s: create delivery: %v", tc.name, err)
@@ -1334,7 +1337,7 @@ func TestChannelTaskDeliveryFreezesThreadPerGeneration(t *testing.T) {
 	} {
 		taskID := newDeliveryTaskID(t, pool)
 		delivery, err := q.CreateChannelTaskDeliveryFromSession(ctx, db.CreateChannelTaskDeliveryFromSessionParams{
-			TaskID: taskID, ChatSessionID: f.sessionID, ContextRevision: tc.revision,
+			TaskID: taskID, ChatSessionID: f.sessionID, BindingID: f.bindingID, ContextRevision: tc.revision,
 		})
 		if err != nil {
 			t.Fatalf("%s: create delivery: %v", tc.name, err)
@@ -1410,7 +1413,7 @@ func TestChannelTaskDeliveryRecoversThreadForIsolatedBinding(t *testing.T) {
 
 			taskID := newDeliveryTaskID(t, pool)
 			delivery, err := q.CreateChannelTaskDeliveryFromSession(ctx, db.CreateChannelTaskDeliveryFromSessionParams{
-				TaskID: taskID, ChatSessionID: f.sessionID, ContextRevision: 1,
+				TaskID: taskID, ChatSessionID: f.sessionID, BindingID: f.bindingID, ContextRevision: 1,
 			})
 			if err != nil {
 				t.Fatalf("create delivery: %v", err)
@@ -1445,13 +1448,15 @@ func seedIsolatedBindingFixture(t *testing.T, pool *pgxpool.Pool, key func(strin
 	}
 	realChatID := "chat-" + fmt.Sprint(time.Now().UnixNano())
 	f.channelChatID = key(realChatID)
-	if _, err := db.New(pool).CreateChannelChatSessionBinding(ctx, db.CreateChannelChatSessionBindingParams{
+	binding, err := db.New(pool).CreateChannelChatSessionBinding(ctx, db.CreateChannelChatSessionBindingParams{
 		ChatSessionID: f.sessionID, InstallationID: f.installationID, ChannelType: "lark",
 		ChannelChatID: f.channelChatID, ChatType: "group",
 		Config: []byte(fmt.Sprintf(configFmt, realChatID)),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create channel binding: %v", err)
 	}
+	f.bindingID = binding.ID
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		_, _ = pool.Exec(cleanupCtx, `
@@ -1495,7 +1500,7 @@ func TestChannelTaskDeliveryIsImmutableAfterCreation(t *testing.T) {
 	setTrigger("om_from_alice", "ou_alice")
 	taskID := newDeliveryTaskID(t, pool)
 	if _, err := q.CreateChannelTaskDeliveryFromSession(ctx, db.CreateChannelTaskDeliveryFromSessionParams{
-		TaskID: taskID, ChatSessionID: f.sessionID, ContextRevision: 1,
+		TaskID: taskID, ChatSessionID: f.sessionID, BindingID: f.bindingID, ContextRevision: 1,
 	}); err != nil {
 		t.Fatalf("create delivery: %v", err)
 	}
@@ -1510,6 +1515,47 @@ func TestChannelTaskDeliveryIsImmutableAfterCreation(t *testing.T) {
 	if reread.ChannelSenderID.String != "ou_alice" || reread.ChannelMessageID.String != "om_from_alice" {
 		t.Errorf("delivery = sender %q message %q after B spoke, want alice's trigger frozen",
 			reread.ChannelSenderID.String, reread.ChannelMessageID.String)
+	}
+}
+
+func TestChannelTaskDeliveryUsesTheExplicitBindingWhenChatHasHistory(t *testing.T) {
+	pool := sessionPersistenceTestDB(t)
+	f := seedSessionPersistenceFixture(t, pool)
+	ctx := context.Background()
+	q := db.New(pool)
+
+	var retiredBindingID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO channel_chat_session_binding (
+			chat_session_id, installation_id, channel_type, channel_chat_id, chat_type,
+			config, route_revision, context_revision, retired_at
+		) VALUES ($1, $2, 'lark', $3, 'p2p', '{}'::jsonb, 2, 1, now())
+		RETURNING id
+	`, f.sessionID, f.installationID, f.channelChatID+"-old").Scan(&retiredBindingID); err != nil {
+		t.Fatalf("create retired binding history: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		bindingID pgtype.UUID
+		route     string
+	}{
+		{"active binding", f.bindingID, f.channelChatID},
+		{"retired binding", retiredBindingID, f.channelChatID + "-old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			taskID := newDeliveryTaskID(t, pool)
+			delivery, err := q.CreateChannelTaskDeliveryFromSession(ctx, db.CreateChannelTaskDeliveryFromSessionParams{
+				TaskID: taskID, ChatSessionID: f.sessionID, BindingID: tc.bindingID, ContextRevision: 1,
+			})
+			if err != nil {
+				t.Fatalf("create delivery: %v", err)
+			}
+			if delivery.BindingID != tc.bindingID || delivery.ChannelChatID != tc.route {
+				t.Fatalf("delivery binding/route = %s/%s, want %s/%s",
+					delivery.BindingID, delivery.ChannelChatID, tc.bindingID, tc.route)
+			}
+		})
 	}
 }
 

@@ -140,6 +140,14 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"598_chat_message_dedupe_key_index":                         "idx_chat_message_dedupe_key",
+	"594_inbox_item_dedupe_key_index":                           "idx_inbox_item_dedupe_key",
+	"591_inbox_lark_delivery_target_index":                      "idx_inbox_lark_delivery_target",
+	"590_inbox_lark_delivery_member_index":                      "idx_inbox_lark_delivery_member",
+	"589_inbox_lark_delivery_due_index":                         "idx_inbox_lark_delivery_due",
+	"588_inbox_lark_delivery_idempotency_index":                 "idx_inbox_lark_delivery_idempotency",
+	"586_inbox_lark_destination_member_index":                   "idx_inbox_lark_destination_member",
+	"584_channel_installation_inbox_member_index":               "idx_channel_installation_inbox_member",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",
@@ -335,6 +343,7 @@ var concurrentIndexCleanups = map[string]string{
 	"418_seat_capacity_due_index":                               "idx_seat_capacity_outbox_due",
 	"419_seat_capacity_share_join_index":                        "idx_seat_capacity_outbox_share_join",
 	"421_channel_chat_active_route_index":                       "idx_channel_chat_session_binding_active_route",
+	"596_channel_chat_active_session_index":                     "idx_channel_chat_session_binding_active_session",
 	"423_channel_task_delivery_pkey_index":                      "channel_task_delivery_pkey",
 	"426_channel_outbound_message_id_index":                     "idx_channel_outbound_message_id",
 	"428_channel_task_delivery_binding_index":                   "idx_channel_task_delivery_binding",
@@ -365,12 +374,14 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"598_chat_message_dedupe_key_index":                     "idx_chat_message_dedupe_key",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",
 	"258_drop_pending_issue_agent_v1":                       "idx_one_pending_task_per_issue_agent",
 	"262_drop_agent_task_queue_terminal_completed_at_v1":    "idx_agent_task_queue_terminal_completed_at",
 	"422_channel_chat_route_history":                        "channel_chat_session_binding_installation_id_channel_chat_i_key",
+	"595_channel_chat_session_history":                      "channel_chat_session_binding_chat_session_id_key",
 	"300_drop_redundant_issue_workspace_number_index":       "idx_issue_workspace_number",
 	"301_drop_redundant_sys_cron_job_plan_index":            "idx_sys_cron_exec_job_plan",
 	"302_drop_redundant_channel_chat_session_binding_index": "idx_channel_chat_session_binding_session",
@@ -407,6 +418,8 @@ var preRollbackHooks = func() map[string]preMigrationHook {
 	for version, index := range concurrentDownIndexCleanups {
 		hooks[version] = cleanupInvalidConcurrentIndexHook(index)
 	}
+	hooks["596_channel_chat_active_session_index"] = refuseChannelChatSessionHistoryRollback
+	hooks["595_channel_chat_session_history"] = prepareChannelChatSessionHistoryRollback
 	// Source-context indexes are split into one-statement concurrent
 	// migrations. Register the guard on every step so a rollback from any
 	// partially applied version fails before dropping its first live index.
@@ -456,6 +469,38 @@ func refuseChannelChatRouteHistoryRollbackWith(ctx context.Context, query rowQue
 	}
 	if channelChatRouteStateExists {
 		return errors.New("cannot roll back channel chat routes after /new has created a channel Chat")
+	}
+	return nil
+}
+
+// prepareChannelChatSessionHistoryRollback removes an interrupted index build
+// before deciding whether the old one-binding-per-Chat schema can be restored.
+// Multiple bindings are valid under 595; silently deleting them or failing on a
+// generic unique violation would lose the route history this schema exists to
+// preserve.
+func prepareChannelChatSessionHistoryRollback(ctx context.Context, pool *pgxpool.Pool) error {
+	if err := cleanupInvalidConcurrentIndexHook(
+		"channel_chat_session_binding_chat_session_id_key",
+	)(ctx, pool); err != nil {
+		return err
+	}
+	return refuseChannelChatSessionHistoryRollback(ctx, pool)
+}
+
+func refuseChannelChatSessionHistoryRollback(ctx context.Context, pool *pgxpool.Pool) error {
+	var hasHistory bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM channel_chat_session_binding
+			GROUP BY chat_session_id
+			HAVING count(*) > 1
+		)
+	`).Scan(&hasHistory); err != nil {
+		return fmt.Errorf("check channel binding history: %w", err)
+	}
+	if hasHistory {
+		return errors.New("cannot roll back channel binding history while a chat session has multiple bindings")
 	}
 	return nil
 }

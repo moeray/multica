@@ -11,6 +11,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/inbox"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -129,6 +130,41 @@ func parseMentions(content string) []mention {
 		result[i] = mention{Type: m.Type, ID: m.ID}
 	}
 	return result
+}
+
+// isAgentHandoffComment reports whether an agent-authored comment hands work
+// to another agent. That mention already triggers the receiving agent's run,
+// so the comment is addressed to that agent rather than to the issue's human
+// watchers. Fanning it out as new_comment would notify the creator that the
+// work "entered review" in addition to the review-result message that follows.
+func isAgentHandoffComment(authorType string, mentions []mention) bool {
+	if authorType != "agent" {
+		return false
+	}
+	for _, m := range mentions {
+		if m.Type == "agent" {
+			return true
+		}
+	}
+	return false
+}
+
+// issueHasSourceChat reports whether the issue resolves to a source chat
+// session. Handoff comments only replace the inbox notification when the
+// review result can actually be delivered back to that chat; otherwise the
+// existing issue/inbox path stays in place.
+func issueHasSourceChat(ctx context.Context, queries *db.Queries, issueID string) bool {
+	issue, err := queries.GetIssue(ctx, parseUUID(issueID))
+	if err != nil {
+		slog.Error("handoff notification: load issue failed", "issue_id", issueID, "error", err)
+		return false
+	}
+	session, err := service.ResolveIssueChatSession(ctx, queries, issue)
+	if err != nil {
+		slog.Warn("handoff notification: resolve source chat failed", "issue_id", issueID, "error", err)
+		return false
+	}
+	return session != nil
 }
 
 // parentBubbleNotifTypes is the allowlist of inbox notification types that
@@ -848,10 +884,13 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 				"from": prevStatus,
 				"to":   issue.Status,
 			})
-			notifySubscribers(ctx, queries, bus, issue.ID, issue.Status, e.WorkspaceID, e,
-				nil, "status_changed", "info",
-				issue.Title, "",
-				statusDetails)
+			suppressStatus, _ := payload["suppress_status_notification"].(bool)
+			if !suppressStatus {
+				notifySubscribers(ctx, queries, bus, issue.ID, issue.Status, e.WorkspaceID, e,
+					nil, "status_changed", "info",
+					issue.Title, "",
+					statusDetails)
+			}
 
 			// When the issue progresses past the failure, retire any stale
 			// task_failed inbox rows so the inbox reflects the current state of
@@ -1006,6 +1045,10 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 			skip := map[string]bool{e.ActorID: true}
 			mentionRecipients = notifyMentionedMembers(bus, queries, e, mentions, issueID, issueTitle, issueStatus,
 				issueTitle, commentContent, skip, commentDetails)
+		}
+
+		if isAgentHandoffComment(authorType, mentions) && issueHasSourceChat(ctx, queries, issueID) {
+			return
 		}
 
 		exclude := map[string]bool{e.ActorID: true}

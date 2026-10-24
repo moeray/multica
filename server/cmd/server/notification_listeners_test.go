@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -490,6 +492,134 @@ func TestNotification_CommentCreated(t *testing.T) {
 	commenterItems := inboxItemsForRecipient(t, queries, commenterID)
 	if len(commenterItems) != 0 {
 		t.Fatalf("expected 0 inbox items for commenter, got %d", len(commenterItems))
+	}
+}
+
+func TestIsAgentHandoffComment(t *testing.T) {
+	cases := []struct {
+		name       string
+		authorType string
+		mentions   []mention
+		want       bool
+	}{
+		{"agent hands off to agent", "agent", []mention{{Type: "agent", ID: "a"}}, true},
+		{"agent mentions member", "agent", []mention{{Type: "member", ID: "m"}}, false},
+		{"member mentions agent", "member", []mention{{Type: "agent", ID: "a"}}, false},
+		{"agent has no mentions", "agent", nil, false},
+		{"agent mentions issue only", "agent", []mention{{Type: "issue", ID: "i"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAgentHandoffComment(tc.authorType, tc.mentions); got != tc.want {
+				t.Fatalf("isAgentHandoffComment(%q, %+v) = %v, want %v", tc.authorType, tc.mentions, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNotification_AgentHandoffCommentSkipsSubscriberNewComment pins the
+// review handoff contract for chat-origin issues: an agent's completion
+// comment that @mentions the reviewer must not also fan out as new_comment to
+// the issue's human subscribers. The mention itself still reaches a mentioned
+// member.
+func TestNotification_AgentHandoffCommentSkipsSubscriberNewComment(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	fx := workspaceFixture(t)
+
+	creatorEmail := "notif-handoff-creator@multica.ai"
+	creatorID := createNotificationMember(t, creatorEmail)
+	t.Cleanup(func() { cleanupTestUser(t, creatorEmail) })
+
+	mentionedEmail := "notif-handoff-mentioned@multica.ai"
+	mentionedID := createNotificationMember(t, mentionedEmail)
+	t.Cleanup(func() { cleanupTestUser(t, mentionedEmail) })
+
+	developerAgentID := fx.Agent(t, "Handoff Developer", "")
+	sessionID := fx.Insert(t, "chat_session", testutil.Cols{
+		"workspace_id": testWorkspaceID,
+		"agent_id":     developerAgentID,
+		"creator_id":   testUserID,
+		"title":        "handoff test",
+	})
+	issueID := fx.Issue(t, "handoff test issue")
+	fx.Exec(t, `UPDATE issue SET origin_type = 'lark_chat', origin_id = $1 WHERE id = $2`, sessionID, issueID)
+	t.Cleanup(func() { cleanupInboxForIssue(t, issueID) })
+	addTestSubscriber(t, issueID, "member", creatorID, "creator")
+
+	const reviewerAgentID = "22222222-2222-4222-8222-222222222222"
+	bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "agent",
+		ActorID:     developerAgentID,
+		Payload: map[string]any{
+			"comment": handler.CommentResponse{
+				ID:         "33333333-3333-4333-8333-333333333333",
+				IssueID:    issueID,
+				AuthorType: "agent",
+				AuthorID:   developerAgentID,
+				Content: fmt.Sprintf(
+					"[@Reviewer](mention://agent/%s) please review; [@Watcher](mention://member/%s) fyi",
+					reviewerAgentID, mentionedID),
+				Type: "comment",
+			},
+			"issue_title":  "handoff test issue",
+			"issue_status": "in_progress",
+		},
+	})
+
+	if items := inboxItemsForRecipient(t, queries, creatorID); len(items) != 0 {
+		t.Fatalf("creator new_comment items = %d, want 0 (the reviewer mention is the handoff)", len(items))
+	}
+	items := inboxItemsForRecipient(t, queries, mentionedID)
+	if len(items) != 1 || items[0].Type != "mentioned" {
+		t.Fatalf("mentioned member items = %+v, want one mentioned", items)
+	}
+}
+
+// TestNotification_AgentHandoffCommentWithoutSourceChatKeepsNewComment pins
+// the fallback: without a source chat there is nowhere to deliver a review
+// result, so the existing issue/inbox notification path must stay in place.
+func TestNotification_AgentHandoffCommentWithoutSourceChatKeepsNewComment(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+
+	creatorEmail := "notif-handoff-fallback-creator@multica.ai"
+	creatorID := createNotificationMember(t, creatorEmail)
+	t.Cleanup(func() { cleanupTestUser(t, creatorEmail) })
+
+	issueID := createTestIssue(t, testWorkspaceID, testUserID)
+	t.Cleanup(func() {
+		cleanupInboxForIssue(t, issueID)
+		cleanupTestIssue(t, issueID)
+	})
+	addTestSubscriber(t, issueID, "member", creatorID, "creator")
+
+	const developerAgentID = "11111111-1111-4111-8111-111111111111"
+	const reviewerAgentID = "22222222-2222-4222-8222-222222222222"
+	bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "agent",
+		ActorID:     developerAgentID,
+		Payload: map[string]any{
+			"comment": handler.CommentResponse{
+				ID:         "33333333-3333-4333-8333-333333333333",
+				IssueID:    issueID,
+				AuthorType: "agent",
+				AuthorID:   developerAgentID,
+				Content:    fmt.Sprintf("[@Reviewer](mention://agent/%s) please review", reviewerAgentID),
+				Type:       "comment",
+			},
+			"issue_title":  "handoff fallback issue",
+			"issue_status": "in_progress",
+		},
+	})
+
+	items := inboxItemsForRecipient(t, queries, creatorID)
+	if len(items) != 1 || items[0].Type != "new_comment" {
+		t.Fatalf("creator items = %+v, want one new_comment on the no-source-chat fallback", items)
 	}
 }
 

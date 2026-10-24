@@ -37,6 +37,7 @@ import { resolveClickIntent, useOptionalNavigation } from "../../navigation";
 import { createLogger } from "@multica/core/logger";
 import { removeChatMessageFromCaches } from "@multica/core/realtime";
 import { useLocale, useT } from "../../i18n";
+import { ChatChannelBadge } from "./chat-channel-badge";
 
 const apiLogger = createLogger("chat.api");
 
@@ -385,6 +386,7 @@ export function ChatThreadList({
             <span className={cn("min-w-0 flex-1 truncate text-body", unread > 0 ? "font-semibold text-foreground" : "font-medium")}>
               {titleText}
             </span>
+            <ChatChannelBadge session={session} className="max-w-[55%]" />
             <span className="ml-auto shrink-0 text-micro text-muted-foreground">{timeText}</span>
           </div>
 

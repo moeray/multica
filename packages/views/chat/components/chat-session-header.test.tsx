@@ -5,6 +5,7 @@ import type { ChatSession } from "@multica/core/types";
 import enChat from "../../locales/en/chat.json";
 
 const updateMutate = vi.hoisted(() => vi.fn());
+const switchBindingMutate = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/paths", () => ({
   useWorkspacePaths: () => ({ agentDetail: (id: string) => `/agents/${id}` }),
@@ -14,6 +15,10 @@ vi.mock("@multica/core/chat/mutations", () => ({
   useUpdateChatSession: () => ({ mutate: updateMutate }),
   useDeleteChatSession: () => ({ mutate: vi.fn() }),
   useSetChatSessionArchived: () => ({ mutate: vi.fn() }),
+  useSwitchChatSessionChannelBinding: () => ({
+    mutateAsync: switchBindingMutate,
+    isPending: false,
+  }),
 }));
 
 vi.mock("@multica/core/chat", () => ({
@@ -61,6 +66,20 @@ function startRename(): HTMLInputElement {
   );
   fireEvent.click(screen.getByTitle(RENAME_LABEL));
   return screen.getByRole("textbox", { name: RENAME_LABEL });
+}
+
+function renderHeader(
+  headerSession: ChatSession,
+  props: {
+    sessions?: ChatSession[];
+    canChangeBinding?: boolean;
+  } = {},
+) {
+  render(
+    <I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <ChatSessionHeader session={headerSession} agent={null} {...props} />
+    </I18nProvider>,
+  );
 }
 
 describe("ChatSessionHeader rename keyboard behavior", () => {
@@ -178,5 +197,111 @@ describe("ChatSessionHeader rename keyboard behavior", () => {
     expect(updateMutate).not.toHaveBeenCalled();
     expect(screen.queryByRole("textbox", { name: RENAME_LABEL })).not.toBeInTheDocument();
     expect(screen.getByText("Original title")).toBeInTheDocument();
+  });
+});
+
+describe("ChatSessionHeader Feishu channel state", () => {
+  const channelSource = {
+    channel_type: "feishu",
+    chat_type: "p2p",
+    installation_id: "installation-1",
+    route_revision: 1,
+  };
+
+  it("shows the current binding for an active Feishu route", () => {
+    renderHeader({
+      ...session,
+      channel_source: channelSource,
+      is_current_channel_route: true,
+    });
+
+    const label = `${enChat.channel.feishu} · ${enChat.channel.current_binding}`;
+    expect(screen.getByTitle(label)).toHaveAttribute("aria-label", label);
+  });
+
+  it("shows a historical session for a retired Feishu route", () => {
+    renderHeader({
+      ...session,
+      channel_source: channelSource,
+      is_current_channel_route: false,
+    });
+
+    const label = `${enChat.channel.feishu} · ${enChat.channel.historical_session}`;
+    expect(screen.getByTitle(label)).toHaveAttribute("aria-label", label);
+  });
+
+  it("does not mark a first-party chat as a Feishu session", () => {
+    renderHeader(session);
+
+    expect(
+      screen.queryByTitle(
+        `${enChat.channel.feishu} · ${enChat.channel.current_binding}`,
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTitle(
+        `${enChat.channel.feishu} · ${enChat.channel.historical_session}`,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers binding changes only on the current route for an authorized caller", () => {
+    const current = {
+      ...session,
+      channel_source: { ...channelSource, channel_chat_id: "chat-1" },
+      is_current_channel_route: true,
+    };
+    renderHeader(current, { canChangeBinding: true });
+
+    expect(
+      screen.getByRole("button", { name: enChat.channel.change_binding }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not offer binding changes for a Feishu group chat", () => {
+    renderHeader(
+      {
+        ...session,
+        channel_source: { ...channelSource, chat_type: "group", channel_chat_id: "chat-1" },
+        is_current_channel_route: true,
+      },
+      { canChangeBinding: true },
+    );
+
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.change_binding }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps historical and read-only Feishu routes free of the switch action", () => {
+    const { unmount } = render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatSessionHeader
+          session={{
+            ...session,
+            channel_source: { ...channelSource, channel_chat_id: "chat-1" },
+            is_current_channel_route: false,
+          }}
+          agent={null}
+          canChangeBinding
+        />
+      </I18nProvider>,
+    );
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.change_binding }),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    renderHeader(
+      {
+        ...session,
+        channel_source: { ...channelSource, channel_chat_id: "chat-1" },
+        is_current_channel_route: true,
+      },
+      { canChangeBinding: false },
+    );
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.change_binding }),
+    ).not.toBeInTheDocument();
   });
 });

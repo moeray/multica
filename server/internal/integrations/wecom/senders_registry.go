@@ -5,7 +5,7 @@ package wecom
 // on exit; OutboundReplier and Outbound look up by installation id to push
 // aibot_send_msg over the same socket the inbound loop owns (aibot has no
 // REST outbound path; every write goes over the WebSocket). wecomChannel.Send
-// is not a reader — it returns ErrSendNotSupported.
+// also reads it for ad-hoc messages with an explicit chat type.
 //
 // Why a registry rather than storing the sender on wecomChannel:
 // OutboundReplier is created once at boot with the shared engine.Router

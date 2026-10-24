@@ -658,6 +658,44 @@ describe("ChatMessageList onboarding kickoff", () => {
       screen.queryByText("INTERNAL ONBOARDING PROMPT"),
     ).not.toBeInTheDocument();
   });
+
+  it("hides an autopilot kickoff and renders its agent report", async () => {
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={new QueryClient()}>
+          <ChatMessageList
+            messages={[
+              {
+                id: "autopilot-kickoff",
+                chat_session_id: "s1",
+                role: "user",
+                content: "INTERNAL AUTOPILOT PROMPT",
+                task_id: TASK_ID,
+                created_at: new Date(0).toISOString(),
+                message_kind: "autopilot_kickoff",
+              },
+              {
+                id: "autopilot-report",
+                chat_session_id: "s1",
+                role: "assistant",
+                content: "Daily report body",
+                task_id: TASK_ID,
+                created_at: new Date(1).toISOString(),
+                message_kind: "agent_report",
+              },
+            ]}
+            pendingTask={undefined}
+            availability="online"
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText("Daily report body")).toBeInTheDocument();
+    expect(
+      screen.queryByText("INTERNAL AUTOPILOT PROMPT"),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ChatMessageList channel quote presentation", () => {
@@ -771,6 +809,44 @@ describe("ChatMessageList channel quote presentation", () => {
     expect(quote?.querySelector('img[alt="Current image"]')).toBeNull();
     expect(screen.getByText("Current rich text")).toBeInTheDocument();
     expect(container.querySelector('img[alt="Current image"]')).not.toBeNull();
+  });
+});
+
+describe("ChatMessageList review result", () => {
+  it("renders the verdict badge and a clickable issue link", async () => {
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={new QueryClient()}>
+          <ChatMessageList
+            messages={[
+              {
+                id: "review-result",
+                chat_session_id: "s1",
+                role: "assistant",
+                content:
+                  "Review failed\n\nMissing permission coverage.\n\n[MP-56](https://app.example/acme/issues/MP-56)",
+                task_id: null,
+                created_at: new Date(0).toISOString(),
+                message_kind: "review_result",
+                review_passed: false,
+                actor_agent_id: "reviewer-1",
+              },
+            ]}
+            pendingTask={undefined}
+            availability="online"
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    expect(
+      await screen.findByText("Review failed", { selector: '[data-slot="badge"]' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MP-56" })).toHaveAttribute(
+      "href",
+      "https://app.example/acme/issues/MP-56",
+    );
+    expect(screen.getByText("Missing permission coverage.")).toBeInTheDocument();
   });
 });
 

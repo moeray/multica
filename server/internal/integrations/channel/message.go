@@ -202,8 +202,15 @@ type InboundMessage struct {
 type OutboundMessage struct {
 	// ChatID is the destination conversation (the platform chat id).
 	ChatID string
+	// ChatType is the normalized conversation shape ("p2p" or "group").
+	// Adapters that need it (DingTalk, WeCom) use it to address the right
+	// proactive-send endpoint; others ignore it.
+	ChatType string
 	// Text is the message body.
 	Text string
+	// RecipientID is the platform user id to address in a p2p conversation.
+	// Only adapters whose proactive-send API needs it (DingTalk) read it.
+	RecipientID string
 	// ThreadID, when set, threads the reply into the given platform
 	// thread / topic. Empty sends at the chat level.
 	ThreadID string

@@ -423,6 +423,9 @@ export interface ChatMessageEventPayload {
   content: string;
   task_id?: string;
   created_at: string;
+  message_kind?: import("./chat").ChatMessageKind;
+  actor_agent_id?: string;
+  review_passed?: boolean;
 }
 
 export interface ChatDonePayload {
@@ -554,7 +557,9 @@ export interface ChatSessionCreatedPayload {
   title: string;
   channel_source: {
     channel_type: string;
+    chat_type?: string;
     installation_id: string;
+    channel_chat_id?: string;
     route_revision: number;
   };
   is_current_channel_route: boolean;

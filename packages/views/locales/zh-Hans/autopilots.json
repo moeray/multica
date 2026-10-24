@@ -32,7 +32,8 @@
   },
   "execution_mode": {
     "create_issue": "创建任务",
-    "run_only": "仅运行"
+    "run_only": "仅运行",
+    "message": "发送消息"
   },
   "relative_date": {
     "today": "今天",
@@ -339,6 +340,10 @@
       "run_only": {
         "label": "仅运行",
         "description": "静默运行，不创建任务"
+      },
+      "message": {
+        "label": "发送消息",
+        "description": "将每次运行结果发送到智能体的聊天"
       }
     }
   },

@@ -17,11 +17,18 @@ export interface ChatPinnedAgent {
  * - "onboarding_opening" — Mika's reply to the kickoff; chat renders the
  *   onboarding starter cards under it instead of quick-action chips.
  */
+// autopilot_kickoff is a hidden server-authored input; agent_report is the
+// assistant reply it produces. review_result is a server-authored assistant
+// message carrying a reviewer's conclusion back into the source chat. All are
+// additive kinds: older readers degrade unknown values to "message".
 export type ChatMessageKind =
   | "message"
   | "no_response"
   | "onboarding_kickoff"
-  | "onboarding_opening";
+  | "onboarding_opening"
+  | "autopilot_kickoff"
+  | "agent_report"
+  | "review_result";
 
 /**
  * A concise follow-up offered by an assistant reply. `label` is rendered in
@@ -73,13 +80,19 @@ export interface ChatLastMessage {
   created_at: string;
   /** Present when the last message is a failed assistant reply. */
   failure_reason?: string | null;
-  /** "message" (default) or "no_response". Optional for older servers. */
+  /** The stored message kind. Optional for older servers. */
   message_kind?: ChatMessageKind;
 }
 
 export interface ChatChannelSource {
   channel_type: string;
+  /** "p2p" or "group" for platforms that expose the conversation shape.
+   *  Optional for older servers. */
+  chat_type?: string;
   installation_id: string;
+  /** The platform conversation this route delivers to. Optional for older
+   *  servers that only exposed the installation and revision. */
+  channel_chat_id?: string;
   route_revision: number;
 }
 
@@ -170,6 +183,11 @@ export interface ChatMessage {
    * servers and on user messages; treat a missing value as "message".
    */
   message_kind?: ChatMessageKind;
+  /** The agent that authored a server-authored message. Set on review_result
+   *  when the reviewer is not the chat session's own agent. */
+  actor_agent_id?: string | null;
+  /** Structured verdict for message_kind="review_result". */
+  review_passed?: boolean | null;
   /** Up to three server-validated follow-ups generated with this reply. */
   quick_actions?: ChatQuickAction[];
 }

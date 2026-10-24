@@ -967,9 +967,19 @@ export const ChatMessageSchema = z.object({
   failure_reason: z.string().nullable().optional(),
   elapsed_ms: z.number().nullable().optional(),
   message_kind: z
-    .enum(["message", "no_response", "onboarding_kickoff", "onboarding_opening"])
+    .enum([
+      "message",
+      "no_response",
+      "onboarding_kickoff",
+      "onboarding_opening",
+      "autopilot_kickoff",
+      "agent_report",
+      "review_result",
+    ])
     .catch("message")
     .optional(),
+  actor_agent_id: z.string().nullable().optional(),
+  review_passed: z.boolean().nullable().optional(),
   // Optional additive data degrades independently: a malformed suggestion
   // must not hide the assistant reply that contains it.
   quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
@@ -2147,12 +2157,17 @@ const ChatLastMessageSchema = z.object({
     "no_response",
     "onboarding_kickoff",
     "onboarding_opening",
+    "autopilot_kickoff",
+    "agent_report",
+    "review_result",
   ]).optional().catch(undefined),
 }).loose();
 
 const ChatChannelSourceSchema = z.object({
   channel_type: z.string().default(""),
+  chat_type: z.string().optional().catch(undefined),
   installation_id: z.string().default(""),
+  channel_chat_id: z.string().optional().catch(undefined),
   route_revision: z.number().default(0),
 }).loose();
 
