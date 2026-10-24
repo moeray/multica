@@ -913,22 +913,31 @@ func removeLocalWorktreeDirWithArtifacts(gitRoot, worktreePath string, patterns 
 }
 
 // reclaimWorktreeArtifacts removes only git-ignored content under the
-// configured artifact directories. Paths are basename-only so a pattern from
-// environment configuration cannot escape the worktree.
+// configured artifact directories. Patterns are exact basenames, matched at
+// any depth (pnpm workspaces create node_modules in each package directory).
+// Wildcard syntax is deliberately not interpreted: the GC's artifact matcher
+// compares literal basenames, so accepting globs here would make worktree
+// cleanup broader than the configured policy.
 func reclaimWorktreeArtifacts(worktreePath string, patterns []string, logger *slog.Logger) {
 	if worktreePath == "" {
 		return
 	}
 	names := reclaimableArtifactNames(patterns)
-	if len(names) == 0 {
+	pathspecs, err := worktreeArtifactPathspecs(worktreePath, names)
+	if err != nil && logger != nil {
+		logger.Warn("execenv: walk worktree for artifact cleanup failed",
+			"path", worktreePath, "patterns", names, "error", err)
+	}
+	if len(pathspecs) == 0 {
 		return
 	}
-	args := append([]string{"clean", "-ffdX", "--"}, names...)
+	args := append([]string{"clean", "-ffdX", "--"}, pathspecs...)
 	out, err := runGit(worktreePath, args...)
 	if err != nil {
 		if logger != nil {
 			logger.Warn("execenv: reclaim ignored worktree artifacts failed",
-				"path", worktreePath, "patterns", names, "output", strings.TrimSpace(out), "error", err)
+				"path", worktreePath, "patterns", names, "pathspecs", pathspecs,
+				"output", strings.TrimSpace(out), "error", err)
 		}
 		return
 	}
@@ -940,8 +949,49 @@ func reclaimWorktreeArtifacts(worktreePath string, patterns []string, logger *sl
 	}
 	if removed > 0 && logger != nil {
 		logger.Info("execenv: reclaimed ignored worktree artifacts",
-			"path", worktreePath, "patterns", names, "entries", removed)
+			"path", worktreePath, "patterns", names, "pathspecs", pathspecs, "entries", removed)
 	}
+}
+
+func worktreeArtifactPathspecs(worktreePath string, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	match := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		match[name] = struct{}{}
+	}
+	specs := make([]string, 0)
+	err := filepath.WalkDir(worktreePath, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if path == worktreePath || !entry.IsDir() {
+			return nil
+		}
+		if entry.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return nil
+		}
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return filepath.SkipDir
+		}
+		if _, ok := match[entry.Name()]; !ok {
+			return nil
+		}
+		rel, relErr := filepath.Rel(worktreePath, path)
+		if relErr != nil {
+			return nil
+		}
+		specs = append(specs, ":(literal)"+filepath.ToSlash(rel))
+		// Removing the matched directory covers every nested artifact below it;
+		// walking a node_modules tree would only add cost.
+		return filepath.SkipDir
+	})
+	return specs, err
 }
 
 func reclaimableArtifactNames(patterns []string) []string {

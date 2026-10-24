@@ -265,6 +265,7 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 		taskDir := filepath.Join(wsDir, entry.Name())
 		if d.isActiveEnvRoot(taskDir) {
 			stats.skipped++
+			stats.cleanupSkipped++
 			continue
 		}
 		meta, metaErr := execenv.ReadGCMeta(taskDir)
@@ -349,6 +350,7 @@ func (d *Daemon) gcWorkspaceIssues(ctx context.Context, workspaceID string, cand
 	for i, candidate := range candidates {
 		if ctx.Err() != nil {
 			stats.skipped += len(candidates) - i
+			stats.cleanupSkipped += len(candidates) - i
 			break
 		}
 		issueID := strings.TrimSpace(candidate.meta.IssueID)
@@ -375,6 +377,7 @@ func (d *Daemon) gcWorkspaceIssues(ctx context.Context, workspaceID string, cand
 func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAction, stats *gcStats) int {
 	if action == gcActionSkip {
 		stats.skipped++
+		stats.cleanupSkipped++
 		return 0
 	}
 	if _, err := d.gcTaskDirOwner(taskDir); err != nil {
@@ -439,22 +442,10 @@ func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAct
 			return 0
 		}
 	case gcActionCleanArtifacts:
-		removed, bytes, perPattern := d.cleanTaskArtifacts(ctx, taskDir, d.cfg.GCArtifactPatterns)
-		recordArtifactCleanup(stats, removed, bytes, perPattern)
-		if removed > 0 {
-			stats.cleanupSucceeded++
-		} else {
-			stats.cleanupSkipped++
-		}
+		recordArtifactCleanup(stats, d.cleanTaskArtifactsResult(ctx, taskDir, d.cfg.GCArtifactPatterns))
 		stats.skipped++ // task dir itself preserved
 	case gcActionCleanManagedArtifacts:
-		removed, bytes, perPattern := d.cleanManagedTaskArtifacts(taskDir)
-		recordArtifactCleanup(stats, removed, bytes, perPattern)
-		if removed > 0 {
-			stats.cleanupSucceeded++
-		} else {
-			stats.cleanupSkipped++
-		}
+		recordArtifactCleanup(stats, d.cleanManagedTaskArtifactsResult(taskDir))
 		stats.skipped++ // task dir itself preserved
 	default:
 		stats.skipped++
@@ -463,17 +454,23 @@ func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAct
 	return 0
 }
 
-func recordArtifactCleanup(stats *gcStats, removed int, bytes int64, perPattern map[string]int) {
-	if removed == 0 {
+func recordArtifactCleanup(stats *gcStats, result artifactCleanupResult) {
+	stats.cleanupSucceeded += result.Removed
+	stats.cleanupFailed += result.Failed
+	stats.cleanupSkipped += result.Skipped
+	if result.Removed == 0 && result.Failed == 0 && result.Skipped == 0 {
+		stats.cleanupSkipped++
+	}
+	if result.Removed == 0 {
 		return
 	}
 	stats.artifactDirs++
-	stats.artifactRemoved += removed
-	stats.bytesReclaimed += bytes
+	stats.artifactRemoved += result.Removed
+	stats.bytesReclaimed += result.Bytes
 	if stats.byPattern == nil {
 		stats.byPattern = map[string]int{}
 	}
-	for pattern, count := range perPattern {
+	for pattern, count := range result.PerPattern {
 		stats.byPattern[pattern] += count
 	}
 }
@@ -1044,6 +1041,14 @@ func (d *Daemon) cleanTaskDir(taskDir string) (bytes int64, outcome taskCleanupO
 // the link target.
 const linkedDirModes = os.ModeSymlink | os.ModeIrregular
 
+type artifactCleanupResult struct {
+	Removed    int
+	Failed     int
+	Skipped    int
+	Bytes      int64
+	PerPattern map[string]int
+}
+
 // cleanTaskArtifacts walks taskDir and deletes every directory whose basename
 // matches one of patterns, plus exact daemon-managed artifact paths. Returns
 // (removedCount, bytesReclaimed, perPattern).
@@ -1065,7 +1070,12 @@ const linkedDirModes = os.ModeSymlink | os.ModeIrregular
 //   - every removal target is verified to live inside taskDir, so a tampered
 //     .gc_meta.json can't trick the daemon into deleting outside its sandbox.
 func (d *Daemon) cleanTaskArtifacts(ctx context.Context, taskDir string, patterns []string) (removed int, bytes int64, perPattern map[string]int) {
-	return d.cleanTaskArtifactsMatching(ctx, taskDir, newArtifactMatcher(patterns, execenv.ManagedReclaimableArtifactSubpaths()))
+	result := d.cleanTaskArtifactsResult(ctx, taskDir, patterns)
+	return result.Removed, result.Bytes, result.PerPattern
+}
+
+func (d *Daemon) cleanTaskArtifactsResult(ctx context.Context, taskDir string, patterns []string) artifactCleanupResult {
+	return d.cleanTaskArtifactsMatchingResult(ctx, taskDir, newArtifactMatcher(patterns, execenv.ManagedReclaimableArtifactSubpaths()))
 }
 
 // cleanManagedTaskArtifacts removes the exact daemon-managed artifact subpaths
@@ -1079,13 +1089,18 @@ func (d *Daemon) cleanTaskArtifacts(ctx context.Context, taskDir string, pattern
 // gone. cleanTaskArtifacts still walks, because its basename patterns can match
 // at any depth; this one has nothing to search for.
 func (d *Daemon) cleanManagedTaskArtifacts(taskDir string) (removed int, bytes int64, perPattern map[string]int) {
-	perPattern = map[string]int{}
+	result := d.cleanManagedTaskArtifactsResult(taskDir)
+	return result.Removed, result.Bytes, result.PerPattern
+}
+
+func (d *Daemon) cleanManagedTaskArtifactsResult(taskDir string) artifactCleanupResult {
+	result := artifactCleanupResult{PerPattern: map[string]int{}}
 	if taskDir == "" {
-		return
+		return result
 	}
 	absRoot, err := filepath.Abs(taskDir)
 	if err != nil {
-		return
+		return result
 	}
 	for _, subpath := range execenv.ManagedReclaimableArtifactSubpaths() {
 		rel, ok := safeRelativePath(subpath)
@@ -1099,14 +1114,15 @@ func (d *Daemon) cleanManagedTaskArtifacts(taskDir string) (removed int, bytes i
 		size := dirSize(target)
 		if rmErr := os.RemoveAll(target); rmErr != nil {
 			d.logger.Warn("gc: artifact remove failed", "path", target, "error", rmErr)
+			result.Failed++
 			continue
 		}
-		removed++
-		bytes += size
-		perPattern[managedArtifactPatternPrefix+filepath.ToSlash(rel)]++
+		result.Removed++
+		result.Bytes += size
+		result.PerPattern[managedArtifactPatternPrefix+filepath.ToSlash(rel)]++
 		d.logger.Info("gc: artifact removed", "path", target, "bytes", size)
 	}
-	return
+	return result
 }
 
 // managedArtifactTarget resolves one managed relative subpath under absRoot to
@@ -1162,14 +1178,19 @@ func hasManagedArtifact(taskDir string) bool {
 }
 
 func (d *Daemon) cleanTaskArtifactsMatching(ctx context.Context, taskDir string, matcher artifactMatcher) (removed int, bytes int64, perPattern map[string]int) {
-	perPattern = map[string]int{}
+	result := d.cleanTaskArtifactsMatchingResult(ctx, taskDir, matcher)
+	return result.Removed, result.Bytes, result.PerPattern
+}
+
+func (d *Daemon) cleanTaskArtifactsMatchingResult(ctx context.Context, taskDir string, matcher artifactMatcher) artifactCleanupResult {
+	result := artifactCleanupResult{PerPattern: map[string]int{}}
 	if taskDir == "" || (len(matcher.basenames) == 0 && len(matcher.exactPaths) == 0) {
-		return
+		return result
 	}
 
 	absRoot, err := filepath.Abs(taskDir)
 	if err != nil {
-		return
+		return result
 	}
 
 	walkErr := filepath.WalkDir(absRoot, func(path string, entry os.DirEntry, err error) error {
@@ -1213,6 +1234,7 @@ func (d *Daemon) cleanTaskArtifactsMatching(ctx context.Context, taskDir string,
 				// Fail closed. A malformed or temporarily unreadable checkout is not
 				// evidence that a matched directory is safe to remove.
 				d.logger.Warn("gc: artifact retained because git tracking could not be determined", "path", path, "error", preserveErr)
+				result.Skipped++
 				return filepath.SkipDir
 			}
 			if preserve {
@@ -1220,6 +1242,7 @@ func (d *Daemon) cleanTaskArtifactsMatching(ctx context.Context, taskDir string,
 					retainedBytes, _ := dirSizeContext(ctx, path)
 					d.logger.DebugContext(ctx, "gc: artifact directory retained to preserve git content", "path", path, "pattern", pattern, "retained_bytes", retainedBytes)
 				}
+				result.Skipped++
 				return filepath.SkipDir
 			}
 		}
@@ -1232,19 +1255,23 @@ func (d *Daemon) cleanTaskArtifactsMatching(ctx context.Context, taskDir string,
 		}
 		if rmErr := os.RemoveAll(path); rmErr != nil {
 			d.logger.Warn("gc: artifact remove failed", "path", path, "error", rmErr)
+			result.Failed++
 			return filepath.SkipDir
 		}
-		removed++
-		bytes += size
-		perPattern[pattern]++
+		result.Removed++
+		result.Bytes += size
+		result.PerPattern[pattern]++
 		d.logger.Info("gc: artifact removed", "path", path, "bytes", size)
 		// Don't descend into the now-deleted subtree.
 		return filepath.SkipDir
 	})
 	if walkErr != nil {
 		d.logger.Warn("gc: artifact walk failed", "dir", taskDir, "error", walkErr)
+		if ctx.Err() == nil {
+			result.Failed++
+		}
 	}
-	return
+	return result
 }
 
 // artifactDirectoryNeedsPreservation protects both tracked content and Git

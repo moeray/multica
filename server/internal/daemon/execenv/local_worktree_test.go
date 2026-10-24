@@ -318,23 +318,43 @@ func TestFinalizeCommitsLeftoversAboveTheUserBaseline(t *testing.T) {
 func TestReclaimWorktreeArtifactsOnlyRemovesIgnoredContent(t *testing.T) {
 	t.Parallel()
 	repo := newTestRepo(t)
-	writeFile(t, filepath.Join(repo, ".gitignore"), "node_modules/\n.next/\n.turbo/\n")
+	writeFile(t, filepath.Join(repo, ".gitignore"), "node_modules/\n*modules/\n.next/\n.turbo/\n")
 	gitRun(t, repo, "add", ".gitignore")
 	gitRun(t, repo, "commit", "-m", "ignore generated artifacts")
 	wt := prepareForTest(t, repo)
 
 	writeFile(t, filepath.Join(wt.Path, "node_modules", "pkg", "index.js"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, "apps", "web", "node_modules", "pkg", "index.js"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, "root", "node_modules", "pkg", "index.js"), "generated\n")
 	writeFile(t, filepath.Join(wt.Path, ".next", "cache", "entry"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, "apps", "web", ".next", "cache", "entry"), "generated\n")
 	writeFile(t, filepath.Join(wt.Path, ".turbo", "log"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, "src", ".turbo", "log"), "generated\n")
+	writeFile(t, filepath.Join(wt.Path, "not_modules", "keep.txt"), "not an artifact\n")
 	writeFile(t, filepath.Join(wt.Path, "notes.txt"), "agent source\n")
 	writeFile(t, filepath.Join(wt.Path, "tracked.txt"), "agent edit\n")
 
-	reclaimWorktreeArtifacts(wt.Path, []string{"node_modules", ".next", "../escape", ".turbo"}, worktreeTestLogger())
+	reclaimWorktreeArtifacts(
+		wt.Path,
+		[]string{"node_modules", ".next", "../escape", ".turbo", "*modules"},
+		worktreeTestLogger(),
+	)
 
-	for _, generated := range []string{"node_modules", ".next", ".turbo"} {
+	for _, generated := range []string{
+		"node_modules",
+		"apps/web/node_modules",
+		"root/node_modules",
+		".next",
+		"apps/web/.next",
+		".turbo",
+		"src/.turbo",
+	} {
 		if _, err := os.Stat(filepath.Join(wt.Path, generated)); !os.IsNotExist(err) {
 			t.Errorf("ignored artifact %s still exists: %v", generated, err)
 		}
+	}
+	if got := readFile(t, filepath.Join(wt.Path, "not_modules", "keep.txt")); got != "not an artifact\n" {
+		t.Errorf("wildcard pattern was interpreted: %q", got)
 	}
 	if got := readFile(t, filepath.Join(wt.Path, "notes.txt")); got != "agent source\n" {
 		t.Errorf("untracked source changed: %q", got)

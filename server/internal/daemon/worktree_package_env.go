@@ -24,5 +24,10 @@ func applyWorktreePackageManagerEnv(dst map[string]string, env *execenv.Environm
 	if method == "" || method == "auto" {
 		return
 	}
+	for key := range dst {
+		if key != pnpmPackageImportMethodEnv && strings.EqualFold(key, pnpmPackageImportMethodEnv) {
+			delete(dst, key)
+		}
+	}
 	dst[pnpmPackageImportMethodEnv] = method
 }
