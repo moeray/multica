@@ -381,6 +381,39 @@ export function useSwitchChatSessionChannelBinding() {
 }
 
 /**
+ * Reattaches a Chat to the external channel conversation it came from, after an
+ * archive retired that route. The server resolves the conversation from the
+ * Chat's own binding history and refuses when another Chat owns it, so this
+ * never rewrites the other side optimistically; refetching the sessions list is
+ * what flips the header entry back to "switch".
+ */
+export function useAttachChatSessionChannelBinding() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+
+  return useMutation({
+    mutationFn: ({ sessionId }: { sessionId: string }) =>
+      api.attachChatSessionChannelBinding(sessionId),
+    onSuccess: (session) => {
+      logger.info("attachChatSessionChannelBinding.success", {
+        sessionId: session.id,
+        agentId: session.agent_id,
+      });
+    },
+    onError: (err, vars) => {
+      logger.error("attachChatSessionChannelBinding.error", {
+        sessionId: vars.sessionId,
+        err,
+      });
+    },
+    onSettled: (_data, _error, vars) => {
+      qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.session(wsId, vars.sessionId) });
+    },
+  });
+}
+
+/**
  * Hard-deletes a chat session. Optimistically removes the row from the
  * sessions list so the dropdown updates instantly; rolls back on error.
  * The matching `chat:session_deleted` WS event keeps other tabs/devices

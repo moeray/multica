@@ -3762,6 +3762,20 @@ export class ApiClient {
     });
   }
 
+  /**
+   * Reattaches a Chat to the external channel conversation it came from. The
+   * route is server-resolved from the Chat's own binding history, so the client
+   * sends no target: the server refuses (409) if another Chat owns it now.
+   */
+  async attachChatSessionChannelBinding(id: string): Promise<ChatSession> {
+    const raw: unknown = await this.fetch(`/api/chat/sessions/${id}/channel-binding`, {
+      method: "POST",
+    });
+    return parseWithFallback(raw, ChatSessionSchema, EMPTY_CHAT_SESSION, {
+      endpoint: "POST /api/chat/sessions/:id/channel-binding",
+    });
+  }
+
   // Quick-agent bar: per-user pinned agents.
   async listChatPinnedAgents(): Promise<ChatPinnedAgent[]> {
     return this.fetch("/api/chat/pinned-agents");

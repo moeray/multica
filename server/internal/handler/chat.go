@@ -295,8 +295,230 @@ func (h *Handler) SwitchChatSessionChannelBinding(w http.ResponseWriter, r *http
 		return
 	}
 	for _, response := range responses {
-		h.publishChatSessionChannelMetadata(workspaceID, userID, response)
+		h.publishChatSessionChannelMetadata(r.Context(), workspaceID, userID, response, nil)
 	}
+	writeJSON(w, http.StatusOK, responses[0])
+}
+
+// AttachChatSessionChannelBinding reattaches a Chat to the external channel
+// conversation it came from after that route was severed (archive, or the
+// hard delete the pre-MP-70 archive path performed). It is the counterpart of
+// SwitchChatSessionChannelBinding: a switch moves a LIVE route from one Chat to
+// another, while this revives the route a Chat used to own.
+//
+// The target is not a caller-supplied id. It is the route recorded on the
+// Chat's own newest binding, which is by definition the conversation this Chat
+// lost. Accepting an arbitrary (installation, channel chat) here would make
+// this an endpoint that takes a route away from another Chat, and the switch
+// handler already owns moving live routes under its two-sided ownership check.
+//
+// A Chat is only rebound onto a FREE route. If the external conversation has
+// since been picked up by another Chat (EnsureSession forks a new Chat on the
+// next inbound message once a binding is retired), that Chat owns the route
+// now; this returns 409 instead of stealing it back, and the user moves it with
+// the switch dialog on the Chat that owns it.
+func (h *Handler) AttachChatSessionChannelBinding(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	workspaceID := ctxWorkspaceID(r.Context())
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	if !ok {
+		return
+	}
+	sessionID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "sessionId"), "chat session id")
+	if !ok {
+		return
+	}
+
+	member, ok := h.workspaceMember(w, r, workspaceID)
+	if !ok {
+		return
+	}
+
+	session, err := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+		ID:          sessionID,
+		WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	// Archiving is what severed the route, so reattaching starts from an
+	// unarchived Chat: the read-only projection must not be a route target.
+	if session.Status != "active" {
+		writeError(w, http.StatusBadRequest, "chat session is archived")
+		return
+	}
+	// Only this Chat's own route comes back, so authorizing on the Chat alone
+	// is enough; unlike a switch there is no second endpoint to protect.
+	if !roleAllowed(member.Role, "owner", "admin") && uuidToString(session.CreatorID) != userID {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+	// Command-only channel sessions are internal control-plane records, not
+	// public Chats, so they never become an interactive channel destination.
+	if _, err := h.Queries.GetPublicChatSessionInWorkspace(r.Context(), db.GetPublicChatSessionInWorkspaceParams{
+		ID:          session.ID,
+		WorkspaceID: workspaceUUID,
+	}); err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+
+	route, err := h.Queries.GetChannelChatSessionBindingBySessionAny(r.Context(), session.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Nothing records this Chat's external conversation: it never had
+			// one, or the pre-MP-70 archive path deleted it along with the
+			// delivery rows. After this change that path only retires, so this
+			// is limited to Chats broken before the fix.
+			writeError(w, http.StatusConflict, "chat has no channel binding to restore")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load chat channel binding")
+		return
+	}
+	if !route.RetiredAt.Valid {
+		// Already the current route. Repeating an attach is a successful
+		// no-op, the same contract the switch endpoint has.
+		h.writeHydratedChatSession(w, r, workspaceID, userID, session)
+		return
+	}
+
+	installation, err := h.Queries.GetChannelInstallationInWorkspace(r.Context(), db.GetChannelInstallationInWorkspaceParams{
+		ID:          route.InstallationID,
+		WorkspaceID: workspaceUUID,
+		ChannelType: route.ChannelType,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "channel installation not found")
+		return
+	}
+	if installation.Status != "active" {
+		writeError(w, http.StatusBadRequest, "channel installation is not active")
+		return
+	}
+	if installation.Purpose != "agent" {
+		writeError(w, http.StatusBadRequest, "channel installation is not an agent installation")
+		return
+	}
+	if installation.AgentID != session.AgentID {
+		writeError(w, http.StatusBadRequest, "channel installation and chat session use different agents")
+		return
+	}
+
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	// Same fence as switch/archive/delete: the Chat row serializes this against
+	// an archive or a route move that committed while this request waited.
+	if _, err := qtx.LockChatSessionForDelete(r.Context(), session.ID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		writeError(w, http.StatusConflict, "chat session changed; retry")
+		return
+	}
+	target, err := qtx.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+		ID:          session.ID,
+		WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	if target.Status != "active" {
+		writeError(w, http.StatusBadRequest, "chat session is archived")
+		return
+	}
+
+	owner, err := qtx.LockCurrentChannelChatSessionBinding(r.Context(), db.LockCurrentChannelChatSessionBindingParams{
+		InstallationID: route.InstallationID,
+		ChannelChatID:  route.ChannelChatID,
+	})
+	switch {
+	case err == nil && uuidToString(owner.ChatSessionID) != uuidToString(session.ID):
+		writeError(w, http.StatusConflict, "channel conversation is already bound to another chat")
+		return
+	case err == nil:
+		h.writeHydratedChatSession(w, r, workspaceID, userID, target)
+		return
+	case errors.Is(err, pgx.ErrNoRows):
+		// The route is free, which is the only state an attach may proceed in.
+	default:
+		writeError(w, http.StatusInternalServerError, "failed to lock channel conversation")
+		return
+	}
+
+	// A Chat that routed somewhere else in the meantime owns that route, and
+	// installing this one over it would silently drop it. Refuse rather than
+	// pick a winner; the caller retries from the state it can see.
+	if _, ownErr := qtx.LockCurrentChannelChatSessionBindingBySession(r.Context(), session.ID); ownErr == nil {
+		writeError(w, http.StatusConflict, "chat session already has an active channel binding")
+		return
+	} else if !errors.Is(ownErr, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to check chat session channel binding")
+		return
+	}
+
+	// Keep the Chat's existing context generation so its transcript and
+	// provider resume pointer stay continuous. A Chat that never had one (its
+	// channel history was pruned by the old archive path) starts at revision 1
+	// with an open boundary the next inbound message resolves.
+	generation, generationErr := qtx.GetLatestChannelChatContextGeneration(r.Context(), session.ID)
+	if errors.Is(generationErr, pgx.ErrNoRows) {
+		generation, generationErr = qtx.CreateChannelChatContextGeneration(r.Context(), session.ID)
+	}
+	if generationErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to prepare chat channel context")
+		return
+	}
+
+	if _, err := qtx.CreateActiveChannelChatSessionBinding(r.Context(), db.CreateActiveChannelChatSessionBindingParams{
+		ChatSessionID:          session.ID,
+		InstallationID:         route.InstallationID,
+		ChannelType:            route.ChannelType,
+		ChannelChatID:          route.ChannelChatID,
+		ChatType:               route.ChatType,
+		Config:                 route.Config,
+		ContextRevision:        generation.Revision,
+		HistoryStartMessageID:  generation.HistoryStartMessageID,
+		HistoryBoundaryPending: generation.HistoryBoundaryPending,
+	}); err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "channel conversation is already bound to another chat")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to install chat channel binding")
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit chat channel binding")
+		return
+	}
+
+	h.writeHydratedChatSession(w, r, workspaceID, userID, target)
+}
+
+// writeHydratedChatSession returns one session with its channel metadata and
+// broadcasts that metadata, so other tabs switch the header entry from
+// "rebind" to "switch" without a refresh.
+func (h *Handler) writeHydratedChatSession(w http.ResponseWriter, r *http.Request, workspaceID, userID string, session db.ChatSession) {
+	responses := []ChatSessionResponse{chatSessionToResponse(session)}
+	if err := h.hydrateChatSessionChannelMetadata(r.Context(), responses); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat channel metadata")
+		return
+	}
+	h.publishChatSessionChannelMetadata(r.Context(), workspaceID, userID, responses[0], nil)
 	writeJSON(w, http.StatusOK, responses[0])
 }
 
@@ -788,16 +1010,21 @@ type SetChatSessionArchivedRequest struct {
 // read-only — SendChatMessage refuses status='archived'. Hard delete is only
 // offered from the archived list, so nothing is destroyed in one hover click.
 //
-// Archiving also severs any external-channel binding. The web send path already
-// treats status='archived' as read-only, but the channel engine (Feishu/Slack)
-// resolves inbound traffic through channel_chat_session_binding without checking
-// session status, so a bound session kept accumulating agent replies — and a
-// stuck unread badge — after the user archived it (MUL-4372). Dropping the
-// binding in the same tx makes the next inbound message for that external chat
-// create a fresh chat_session under a new binding (see EnsureSession) instead of
-// reviving this archived one. Unarchive deliberately does NOT recreate the
-// binding: if later traffic already forked a new session, that session owns the
-// channel now, and restoring the old binding would steal it back.
+// Archiving also severs any external-channel binding, but it RETIRES the row
+// instead of deleting it. The web send path already treats status='archived' as
+// read-only, yet the channel engine (Feishu/Slack) resolves inbound traffic
+// through channel_chat_session_binding without checking session status, so a
+// bound session kept accumulating agent replies — and a stuck unread badge —
+// after the user archived it (MUL-4372). Retiring in the same tx has the same
+// routing effect (inbound only resolves retired_at IS NULL, so the next message
+// forks a fresh chat_session under a new binding; see EnsureSession) while the
+// row itself survives as the Chat's channel source. Deleting it was MP-70's
+// reported bug: channel_source vanished, and with it the only description of
+// the external route this Chat came from, so nothing could offer to reattach
+// it after unarchive. Unarchive still does NOT recreate the binding on its own:
+// if later traffic already forked a new session, that session owns the channel
+// now, and silently stealing it back would be wrong. Reattaching is an explicit
+// user action (AttachChatSessionChannelBinding).
 //
 // Severing that binding is what makes archiving a bound session cancel its
 // in-flight tasks: the adapter still holds the chat id, so a turn that survives
@@ -850,22 +1077,23 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 	var reactionTargets map[string]*events.ChannelReactionTarget
 
 	if req.Archived {
-		// Read the binding BEFORE the delete below, which is what erases the
-		// evidence: after it runs there is no way to tell a session that was
-		// on a channel from one that never was.
+		// Read the binding BEFORE retiring it below: the pre-read answers "was
+		// this session ever on a channel", which decides whether an in-flight
+		// task has a room to answer into, and it includes retired rows so a
+		// later archive of an already-unrouted Chat behaves the same way.
 		_, bindingErr := qtx.GetChannelChatSessionBindingBySessionAny(r.Context(), session.ID)
 		switch {
 		case bindingErr == nil:
-			// Bound, and the delete below is about to drop that binding.
+			// Bound, and the retire below is about to drop that route.
 			// ClaimAgentTask does not read chat_session.status, so a task
 			// queued before the archive stays claimable after it: the daemon
 			// runs a turn on a conversation the user closed, spending runtime
 			// and quota and writing assistant messages into an archived chat.
-			// The binding is gone by then, so the brief describes the run as a
+			// The route is retired by then, so the brief describes the run as a
 			// private web chat — the misattribution the history note below
 			// exists to prevent — while the outbound senders, which resolve
-			// their destination through that same deleted row, have no route
-			// left to deliver on. Cancel in the same tx that drops the
+			// their destination through that same retired row, have no active
+			// route left to deliver on. Cancel in the same tx that retires the
 			// binding, as DeleteChatSession does.
 			//
 			// The query is not limited to never-started work: it also matches
@@ -905,8 +1133,30 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusInternalServerError, "failed to capture channel reaction targets")
 			return
 		}
-		if err := qtx.DeleteChannelChatSessionBindingBySession(r.Context(), session.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to clear chat session channel binding")
+		// Retire the active route instead of deleting it. Inbound resolution
+		// only ever matches retired_at IS NULL, so this stops channel traffic
+		// exactly like the old delete did, while the row keeps the Chat's
+		// channel_source and the external chat it came from — the only thing
+		// that can offer to reattach it after unarchive (MP-70). The lock is
+		// the same fence SwitchChatSessionChannelBinding takes before it moves
+		// a route, so an archive racing a switch cannot retire the row the
+		// switch is about to install.
+		active, lockErr := qtx.LockCurrentChannelChatSessionBindingBySession(r.Context(), session.ID)
+		switch {
+		case lockErr == nil:
+			if _, err := qtx.RetireChannelChatSessionBinding(r.Context(), db.RetireChannelChatSessionBindingParams{
+				ID:                  active.ID,
+				HistoryEndMessageID: active.LastMessageID,
+			}); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to retire chat session channel binding")
+				return
+			}
+		case errors.Is(lockErr, pgx.ErrNoRows):
+			// Only retired history left: nothing routes inbound traffic here,
+			// and those rows are the record this path exists to keep.
+		default:
+			slog.Warn("lock chat session channel binding failed", "session_id", sessionID, "error", lockErr)
+			writeError(w, http.StatusInternalServerError, "failed to retire chat session channel binding")
 			return
 		}
 	}
@@ -926,16 +1176,18 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 	// rather than at the daemon's next poll.
 	h.TaskService.BroadcastCancelledTasks(r.Context(), workspaceID, cancelled, reactionTargets)
 
-	resolvedSessionID := uuidToString(updated.ID)
+	responses := []ChatSessionResponse{chatSessionToResponse(updated)}
+	// Archive is exactly the event that changes a Chat's channel route, so the
+	// response and the broadcast both carry the post-archive metadata: without
+	// it every other tab keeps the pre-archive is_current_channel_route=true and
+	// offers "switch binding" on a Chat whose route was just retired.
+	if err := h.hydrateChatSessionChannelMetadata(r.Context(), responses); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat channel metadata")
+		return
+	}
 	status := updated.Status
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
-		ChatSessionID: resolvedSessionID,
-		Title:         updated.Title,
-		Status:        &status,
-		UpdatedAt:     timestampToString(updated.UpdatedAt),
-	})
-
-	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
+	h.publishChatSessionChannelMetadata(r.Context(), workspaceID, userID, responses[0], &status)
+	writeJSON(w, http.StatusOK, responses[0])
 }
 
 // DeleteChatSession hard-deletes a chat session owned by the caller. The
@@ -2196,8 +2448,14 @@ type ChatSessionResponse struct {
 	// older Chat that remains readable and writable in Multica.
 	ChannelSource         *ChatSessionChannelSourceResponse `json:"channel_source,omitempty"`
 	IsCurrentChannelRoute *bool                             `json:"is_current_channel_route,omitempty"`
-	CreatedAt             string                            `json:"created_at"`
-	UpdatedAt             string                            `json:"updated_at"`
+	// ChannelOrigin marks a Chat that has channel provenance at all — a binding
+	// row in any state, or a channel-ingested message. It is the only signal
+	// left for a Chat whose binding row was deleted, which is what lets the
+	// header offer to reattach it (see AttachChatSessionChannelBinding). Always
+	// present so clients need no separate "older server" branch.
+	ChannelOrigin bool   `json:"channel_origin"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 type ChatSessionChannelSourceResponse struct {
@@ -2234,12 +2492,37 @@ func (h *Handler) hydrateChatSessionChannelMetadata(ctx context.Context, session
 			continue
 		}
 		current := !binding.RetiredAt.Valid
+		sessions[i].ChannelOrigin = true
 		sessions[i].ChannelSource = &ChatSessionChannelSourceResponse{
 			ChannelType: binding.ChannelType, ChatType: binding.ChatType,
 			InstallationID: uuidToString(binding.InstallationID),
 			ChannelChatID:  binding.ChannelChatID, RouteRevision: binding.RouteRevision,
 		}
 		sessions[i].IsCurrentChannelRoute = &current
+	}
+	// A Chat whose binding row is gone still has provenance: channel_ingested
+	// is stamped when the message arrives and survives archiving and binding
+	// deletion, so it is what keeps a pre-MP-70 Chat classifiable instead of
+	// silently turning it into a first-party Chat. Only unbound Chats need the
+	// lookup, and a list of first-party Chats skips it entirely.
+	var unbound []pgtype.UUID
+	unboundIndex := make(map[string]int, len(sessions))
+	for i := range sessions {
+		if _, ok := bySession[sessions[i].ID]; !ok {
+			unboundIndex[sessions[i].ID] = i
+			unbound = append(unbound, parseUUID(sessions[i].ID))
+		}
+	}
+	if len(unbound) > 0 {
+		ingested, err := h.Queries.ListChannelIngestedChatSessions(ctx, unbound)
+		if err != nil {
+			return err
+		}
+		for _, sessionID := range ingested {
+			if i, ok := unboundIndex[uuidToString(sessionID)]; ok {
+				sessions[i].ChannelOrigin = true
+			}
+		}
 	}
 	return nil
 }
@@ -2257,7 +2540,10 @@ func channelBindingPreferred(candidate, current db.ChannelChatSessionBinding) bo
 	return candidate.CreatedAt.Time.After(current.CreatedAt.Time)
 }
 
-func (h *Handler) publishChatSessionChannelMetadata(workspaceID, userID string, response ChatSessionResponse) {
+// publishChatSessionChannelMetadata broadcasts one Chat's channel metadata so
+// other tabs repaint the header entry without a refetch. status is set only by
+// the archive path, which changes the route and the status in one request.
+func (h *Handler) publishChatSessionChannelMetadata(ctx context.Context, workspaceID, userID string, response ChatSessionResponse, status *string) {
 	payload := protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: response.ID,
 		Title:         response.Title,
@@ -2273,6 +2559,7 @@ func (h *Handler) publishChatSessionChannelMetadata(workspaceID, userID string, 
 		}
 	}
 	payload.IsCurrentChannelRoute = response.IsCurrentChannelRoute
+	payload.Status = status
 	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, response.ID, payload)
 }
 

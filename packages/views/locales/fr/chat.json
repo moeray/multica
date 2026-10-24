@@ -266,6 +266,27 @@
       "forbidden_error": "Vous ne pouvez pas modifier cette liaison Feishu.",
       "not_found_error": "Cette discussion n’est plus disponible.",
       "generic_error": "Impossible de changer la liaison. Réessayez."
+    },
+    "rebind": "Relier la discussion",
+    "rebind_dialog": {
+      "description": "Cette discussion était utilisée via Feishu. La relier fait à nouveau arriver les messages Feishu ici.",
+      "confirm": "Relier",
+      "rebinding": "Liaison...",
+      "cancel": "Annuler",
+      "conflict_error": "Cette conversation Feishu est maintenant liée à une autre discussion. Ouvrez-la et utilisez « Changer de discussion liée » pour la ramener ici.",
+      "forbidden_error": "Vous ne pouvez pas modifier cette liaison.",
+      "not_found_error": "Cette discussion n'est plus disponible.",
+      "generic_error": "Impossible de relier cette discussion. Réessayez.",
+      "unavailable_title": "Liaison impossible à restaurer",
+      "unavailable": "Une ancienne version a supprimé la liaison Feishu de cette discussion : la conversation Feishu d'origine n'est plus enregistrée. Envoyez un message à l'agent dans Feishu, puis utilisez « Changer de discussion liée » sur la nouvelle discussion pour la ramener ici.",
+      "close": "Compris"
+    },
+    "archive_binding": {
+      "title": "Archiver et déconnecter Feishu ?",
+      "description": "Cette discussion reçoit actuellement les messages Feishu. L'archivage les interrompt ; désarchivez-la puis reliez-la pour la restaurer.",
+      "cancel": "Annuler",
+      "confirm": "Archiver",
+      "archiving": "Archivage..."
     }
   },
   "header": {

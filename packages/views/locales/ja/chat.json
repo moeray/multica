@@ -262,6 +262,27 @@
       "forbidden_error": "この Feishu 連携は変更できません。",
       "not_found_error": "このチャットは利用できなくなりました。",
       "generic_error": "紐付けを変更できませんでした。もう一度お試しください。"
+    },
+    "rebind": "再紐付け",
+    "rebind_dialog": {
+      "description": "このチャットは以前 Feishu 経由で使われていました。再紐付けすると、Feishu のメッセージが再びここに届きます。",
+      "confirm": "再紐付け",
+      "rebinding": "紐付け中...",
+      "cancel": "キャンセル",
+      "conflict_error": "この Feishu トークは別のチャットに紐付いています。そのチャットで「紐付け先を変更」を使ってこちらに戻してください。",
+      "forbidden_error": "この紐付けを変更する権限がありません。",
+      "not_found_error": "このチャットは利用できません。",
+      "generic_error": "再紐付けに失敗しました。もう一度お試しください。",
+      "unavailable_title": "紐付けを復元できません",
+      "unavailable": "旧バージョンがこのチャットの Feishu 紐付けを削除したため、元の Feishu トークが記録に残っていません。Feishu でエージェントにメッセージを送り、新しいチャットで「紐付け先を変更」を使ってこちらに戻してください。",
+      "close": "了解しました"
+    },
+    "archive_binding": {
+      "title": "アーカイブして Feishu との紐付けを解除しますか？",
+      "description": "このチャットは現在 Feishu の受信先です。アーカイブすると Feishu のメッセージは届かなくなります。アーカイブを解除して再紐付けすると復元できます。",
+      "cancel": "キャンセル",
+      "confirm": "アーカイブ",
+      "archiving": "アーカイブ中..."
     }
   },
   "header": {

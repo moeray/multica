@@ -34,6 +34,7 @@ import { AppLink } from "../../navigation";
 import { useT } from "../../i18n";
 import { ChatChannelBadge, isFeishuChatSession } from "./chat-channel-badge";
 import { ChatChannelBindingDialog } from "./chat-channel-binding-dialog";
+import { ChatChannelRebindDialog } from "./chat-channel-rebind-dialog";
 
 /**
  * Per-session header for the conversation pane: agent avatar + editable chat
@@ -66,9 +67,23 @@ export function ChatSessionHeader({
 
   const isArchived = session.status === "archived";
   const isFeishu = isFeishuChatSession(session);
+  const isCurrentChannelRoute = session.is_current_channel_route === true;
+  // Channel provenance outlives the binding row: a Chat archived by the older
+  // delete-based path keeps only its ingested messages, no channel_source. Both
+  // signals qualify, so a Chat broken before the fix still gets the entry. An
+  // unknown channel type (that legacy case) is allowed; a known non-Feishu one
+  // is not, because this surface only speaks Feishu.
+  const hasChannelOrigin = session.channel_origin === true || session.channel_source != null;
+  const canRebindChannel =
+    canChangeBinding &&
+    !isArchived &&
+    !isCurrentChannelRoute &&
+    hasChannelOrigin &&
+    (session.channel_source == null || session.channel_source.channel_type === "feishu");
 
   const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [draft, setDraft] = useState(session.title ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -125,10 +140,22 @@ export function ChatSessionHeader({
     deleteSession.mutate(session.id);
   };
 
-  const doArchive = () =>
+  const archiveNow = () =>
     onArchive
       ? onArchive(session)
       : setArchived.mutate({ sessionId: session.id, archived: true });
+
+  // Archiving is the reversible, normally unconfirmed action. It is only
+  // destructive for a Chat that currently receives channel messages, because
+  // archiving retires that route: the user has to be told, not surprised by a
+  // silently disconnected Feishu chat (MP-70).
+  const doArchive = () => {
+    if (isCurrentChannelRoute) {
+      setConfirmArchive(true);
+      return;
+    }
+    archiveNow();
+  };
   const doUnarchive = () => setArchived.mutate({ sessionId: session.id, archived: false });
 
   return (
@@ -206,7 +233,10 @@ export function ChatSessionHeader({
             {title}
           </button>
         )}
-        {(agent || isFeishu) && (
+        {/* hasChannelOrigin also covers isFeishu (a channel_source implies it),
+            and keeps the row — and with it the rebind entry — for a Chat whose
+            binding row is gone. */}
+        {(agent || hasChannelOrigin) && (
           <div className="flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
             {agent && (
               <span className="min-w-0 truncate">
@@ -221,19 +251,27 @@ export function ChatSessionHeader({
             />
             {canChangeBinding &&
               isFeishu &&
-              session.is_current_channel_route === true &&
+              isCurrentChannelRoute &&
               session.channel_source?.chat_type === "p2p" &&
               session.channel_source?.installation_id &&
               session.channel_source.channel_chat_id && (
                 <ChatChannelBindingDialog session={session} sessions={sessions} />
               )}
+            {canRebindChannel && <ChatChannelRebindDialog session={session} />}
           </div>
         )}
       </div>
 
       <DropdownMenu>
         <DropdownMenuTrigger
-          render={<Button variant="ghost" size="icon-sm" className="text-muted-foreground" />}
+          render={
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground"
+              aria-label={t(($) => $.list.row_actions_aria)}
+            />
+          }
         >
           <MoreHorizontal className="h-4 w-4" />
         </DropdownMenuTrigger>
@@ -285,6 +323,28 @@ export function ChatSessionHeader({
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {t(($) => $.session_history.delete_dialog.confirm)}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmArchive} onOpenChange={setConfirmArchive}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t(($) => $.channel.archive_binding.title)}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(($) => $.channel.archive_binding.description)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t(($) => $.channel.archive_binding.cancel)}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmArchive(false);
+                archiveNow();
+              }}
+            >
+              {t(($) => $.channel.archive_binding.confirm)}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

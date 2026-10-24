@@ -155,6 +155,18 @@ describe("ChatSessionSchema", () => {
     })).toEqual(EMPTY_CHAT_SESSION);
   });
 
+  it("keeps channel origin for a Chat whose binding row is gone", () => {
+    // MP-70: the ingested-message provenance survives binding deletion, so a
+    // Chat with no channel_source must still report where it came from.
+    const parsed = ChatSessionSchema.parse({ ...baseSession, channel_origin: true });
+    expect(parsed.channel_origin).toBe(true);
+    expect(parsed.channel_source).toBeUndefined();
+
+    const malformed = ChatSessionSchema.parse({ ...baseSession, channel_origin: "yes" });
+    expect(malformed.channel_origin).toBeUndefined();
+    expect(malformed.id).toBe("chat-1");
+  });
+
   it("keeps channel metadata compatible with older servers", () => {
     const parsed = ChatSessionSchema.parse({
       ...baseSession,

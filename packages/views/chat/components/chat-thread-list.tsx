@@ -134,6 +134,10 @@ export function ChatThreadList({
 
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [confirmingStopId, setConfirmingStopId] = useState<string | null>(null);
+  // Archiving a Chat that currently receives channel messages retires that
+  // route, so it gets the same inline confirm stop/delete use instead of firing
+  // straight from a hover (MP-70). Web-only chats keep the unconfirmed path.
+  const [confirmingArchiveId, setConfirmingArchiveId] = useState<string | null>(null);
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
   const deleteSession = useDeleteChatSession();
   const setPinned = useSetChatSessionPinned();
@@ -219,7 +223,8 @@ export function ChatThreadList({
     const unread = isCurrent ? 0 : (session.unread_count ?? 0);
     const isConfirmingDelete = confirmingDeleteId === session.id;
     const isConfirmingStop = confirmingStopId === session.id && !!pendingTask;
-    const isConfirmingAction = isConfirmingDelete || isConfirmingStop;
+    const isConfirmingArchive = confirmingArchiveId === session.id;
+    const isConfirmingAction = isConfirmingDelete || isConfirmingStop || isConfirmingArchive;
     const titleText = session.title?.trim() || t(($) => $.window.untitled);
     const last = session.last_message ?? null;
     const timeText = last
@@ -314,7 +319,13 @@ export function ChatThreadList({
                   key: "archive",
                   icon: <Archive className="size-3.5" />,
                   label: t(($) => $.list.archive),
-                  onSelect: () => onArchive(session),
+                  onSelect: () => {
+                    if (session.is_current_channel_route === true) {
+                      setConfirmingArchiveId(session.id);
+                      return;
+                    }
+                    onArchive(session);
+                  },
                 },
           ];
 
@@ -404,6 +415,18 @@ export function ChatThreadList({
                   pending={deleteSession.isPending}
                   onCancel={() => setConfirmingDeleteId(null)}
                   onConfirm={() => handleConfirmDelete(session)}
+                />
+              ) : isConfirmingArchive ? (
+                <ConfirmRow
+                  label={t(($) => $.channel.archive_binding.title)}
+                  cancelText={t(($) => $.channel.archive_binding.cancel)}
+                  confirmText={t(($) => $.channel.archive_binding.confirm)}
+                  pending={false}
+                  onCancel={() => setConfirmingArchiveId(null)}
+                  onConfirm={() => {
+                    setConfirmingArchiveId(null);
+                    onArchive(session);
+                  }}
                 />
               ) : isConfirmingStop && pendingTask ? (
                 <ConfirmRow

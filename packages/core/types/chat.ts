@@ -122,6 +122,12 @@ export interface ChatSession {
   channel_source?: ChatChannelSource;
   /** Absent for first-party Chats. */
   is_current_channel_route?: boolean;
+  /** True when this Chat has channel provenance at all: a binding in any state,
+   *  or a channel-ingested message. Unlike `channel_source` it survives a
+   *  binding row that was deleted, so it is what keeps the "rebind" entry
+   *  available for Chats broken before that deletion stopped happening.
+   *  Optional for older servers. */
+  channel_origin?: boolean;
   created_at: string;
   updated_at: string;
 }
