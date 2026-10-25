@@ -3001,7 +3001,10 @@ func (s *TaskService) CancelTaskWithResult(ctx context.Context, taskID pgtype.UU
 				return fmt.Errorf("cancel queued task: %w", err)
 			}
 			cancelledChatMessage, err = s.settleQueuedChatInput(ctx, qtx, task, opts.QueueAction)
-			return err
+			if err != nil {
+				return err
+			}
+			return releaseChatContextStamp(ctx, qtx, task)
 		})
 	} else {
 		// The status flip and the chat resume-pointer advance commit together. Split
@@ -3043,6 +3046,9 @@ func (s *TaskService) CancelTaskWithResult(ctx context.Context, taskID pgtype.UU
 			}
 			if !cancelled.ChatSessionID.Valid {
 				return nil
+			}
+			if err := releaseChatContextStamp(ctx, qtx, cancelled); err != nil {
+				return err
 			}
 			return qtx.AdvanceCancelledChatSessionPointer(ctx, cancelled.ID)
 		})
@@ -3105,6 +3111,9 @@ func (s *TaskService) CancelQueuedChatTasks(ctx context.Context, sessionID, agen
 		}
 		for _, task := range tasks {
 			if _, err := s.settleQueuedChatInput(ctx, qtx, task, "remove"); err != nil {
+				return err
+			}
+			if err := releaseChatContextStamp(ctx, qtx, task); err != nil {
 				return err
 			}
 		}
@@ -3188,6 +3197,26 @@ func createAssistantChatMessage(ctx context.Context, qtx *db.Queries, params db.
 		return db.ChatMessage{}, fmt.Errorf("reanchor next queued direct chat input: %w", err)
 	}
 	return row, nil
+}
+
+// releaseChatContextStamp hands a cancelled turn's injected mirrors back to the
+// un-injected pool (MP-73). Stamps are written at enqueue and read at claim, so
+// only a turn cancelled BEFORE it was ever claimed needs this: it will never
+// run, and keeping the stamp would hide those rows from every later turn — the
+// member would never see the review result again. dispatched_at is set by the
+// claim and by nothing earlier, so a claimed turn keeps its stamp, which is
+// exactly what stops the next turn from injecting the same mirror twice.
+func releaseChatContextStamp(ctx context.Context, qtx *db.Queries, task db.AgentTaskQueue) error {
+	if !task.ChatSessionID.Valid || task.DispatchedAt.Valid {
+		return nil
+	}
+	if err := qtx.ReleaseChatContextMessagesFromTask(ctx, db.ReleaseChatContextMessagesFromTaskParams{
+		ChatSessionID: task.ChatSessionID,
+		TaskID:        task.ID,
+	}); err != nil {
+		return fmt.Errorf("release cancelled chat context messages: %w", err)
+	}
+	return nil
 }
 
 func (s *TaskService) settleQueuedChatInput(
