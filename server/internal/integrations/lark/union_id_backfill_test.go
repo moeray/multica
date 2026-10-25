@@ -204,6 +204,97 @@ func TestBackfillBotUnionIDs_ForcedRetryAfterPermissionRestored(t *testing.T) {
 	}
 }
 
+// TestBackfillBotUnionIDs_ForcedRetryTransientFailureClearsMarker pins the
+// merged behaviour for an inconclusive forced re-probe: a timeout / 5xx
+// must not leave the old "unavailable" marker behind, otherwise the next
+// boot WITHOUT the force switch would skip the install again and the
+// operator's one retry would be silently undone.
+func TestBackfillBotUnionIDs_ForcedRetryTransientFailureClearsMarker(t *testing.T) {
+	row := backfillRow(t, backfillInstallA, "cli_a")
+	row.BotUnionIDStatus = BotUnionIDStatusUnavailable
+	row.BotUnionIDReason = `code=41050 msg="no user authority error"`
+	store := &fakeUnionIDBackfillStore{rows: []Installation{row}}
+	api := &backfillFakeAPI{
+		fakeAPIClient: &fakeAPIClient{},
+		err:           errors.New("dial tcp: i/o timeout"),
+	}
+	capture, log := newLogCapture()
+
+	BackfillBotUnionIDs(context.Background(), store, api, backfillFakeCreds{}, log, true)
+
+	rows, writes := store.snapshot()
+	if got := api.callCount(); got != 1 {
+		t.Fatalf("GetBotInfo calls with force: got %d want 1", got)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("writes with force: got %d want 1 (marker cleared)", len(writes))
+	}
+	if writes[0].Status != "" {
+		t.Errorf("persisted status: got %q want empty", writes[0].Status)
+	}
+	if writes[0].BotUnionID.Valid {
+		t.Errorf("persisted union_id: got %q, want no write (probe had no value)",
+			writes[0].BotUnionID.String)
+	}
+	if rows[0].BotUnionIDStatus != "" {
+		t.Errorf("row status: got %q want empty (next boot must retry)", rows[0].BotUnionIDStatus)
+	}
+	if n := capture.countAtOrAbove(slog.LevelWarn, "GetBotInfo failed"); n != 1 {
+		t.Errorf("warnings: got %d want 1", n)
+	}
+
+	// The next boot, without the switch, retries instead of skipping.
+	api.mu.Lock()
+	api.err = nil
+	api.info = BotInfo{OpenID: "ou_bot_cli_a", UnionID: "on_bot_cli_a"}
+	api.mu.Unlock()
+	BackfillBotUnionIDs(context.Background(), store, api, backfillFakeCreds{}, log, false)
+	if got := api.callCount(); got != 2 {
+		t.Fatalf("GetBotInfo calls after next boot: got %d want 2 (marker cleared, retried)", got)
+	}
+	rows, _ = store.snapshot()
+	if got := rows[0].BotUnionID.String; got != "on_bot_cli_a" {
+		t.Errorf("union_id after recovery: got %q want on_bot_cli_a", got)
+	}
+	if rows[0].BotUnionIDStatus != "" {
+		t.Errorf("status after recovery: got %q want empty", rows[0].BotUnionIDStatus)
+	}
+}
+
+// TestBackfillBotUnionIDs_ForcedRetryUnclassifiedMissClearsMarker covers
+// the other inconclusive outcome: GetBotInfo succeeds but reports neither
+// a union_id nor a classified reason. It is not a confirmation of the old
+// verdict, so the marker must go too.
+func TestBackfillBotUnionIDs_ForcedRetryUnclassifiedMissClearsMarker(t *testing.T) {
+	row := backfillRow(t, backfillInstallA, "cli_a")
+	row.BotUnionIDStatus = BotUnionIDStatusUnavailable
+	row.BotUnionIDReason = `code=41050 msg="no user authority error"`
+	store := &fakeUnionIDBackfillStore{rows: []Installation{row}}
+	api := &backfillFakeAPI{
+		fakeAPIClient: &fakeAPIClient{},
+		info:          BotInfo{OpenID: "ou_bot_cli_a"},
+	}
+	_, log := newLogCapture()
+
+	BackfillBotUnionIDs(context.Background(), store, api, backfillFakeCreds{}, log, true)
+
+	rows, writes := store.snapshot()
+	if len(writes) != 1 {
+		t.Fatalf("writes with force: got %d want 1 (marker cleared)", len(writes))
+	}
+	if writes[0].Status != "" {
+		t.Errorf("persisted status: got %q want empty", writes[0].Status)
+	}
+	if rows[0].BotUnionIDStatus != "" {
+		t.Errorf("row status: got %q want empty", rows[0].BotUnionIDStatus)
+	}
+
+	BackfillBotUnionIDs(context.Background(), store, api, backfillFakeCreds{}, log, false)
+	if got := api.callCount(); got != 2 {
+		t.Errorf("GetBotInfo calls after next boot: got %d want 2 (retried)", got)
+	}
+}
+
 // TestBackfillBotUnionIDs_TransientFailureIsNotCached guards the other
 // half of the negative cache: a timeout / 5xx is news every boot and must
 // NOT mark the installation unavailable, otherwise one bad network minute
