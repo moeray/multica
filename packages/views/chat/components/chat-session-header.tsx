@@ -74,9 +74,11 @@ export function ChatSessionHeader({
   // unknown channel type (that legacy case) is allowed; a known non-Feishu one
   // is not, because this surface only speaks Feishu.
   const hasChannelOrigin = session.channel_origin === true || session.channel_source != null;
+  // Archiving is what retired the route, so an archived Chat is exactly the
+  // case that needs this entry: confirming it unarchives the Chat and then
+  // reattaches (MP-81).
   const canRebindChannel =
     canChangeBinding &&
-    !isArchived &&
     !isCurrentChannelRoute &&
     hasChannelOrigin &&
     (session.channel_source == null || session.channel_source.channel_type === "feishu");

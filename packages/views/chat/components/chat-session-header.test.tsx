@@ -16,7 +16,7 @@ vi.mock("@multica/core/paths", () => ({
 vi.mock("@multica/core/chat/mutations", () => ({
   useUpdateChatSession: () => ({ mutate: updateMutate }),
   useDeleteChatSession: () => ({ mutate: vi.fn() }),
-  useSetChatSessionArchived: () => ({ mutate: archiveMutate }),
+  useSetChatSessionArchived: () => ({ mutate: archiveMutate, mutateAsync: vi.fn() }),
   useSwitchChatSessionChannelBinding: () => ({
     mutateAsync: switchBindingMutate,
     isPending: false,
@@ -319,7 +319,7 @@ describe("ChatSessionHeader Feishu channel state", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("hides rebind from callers who cannot change bindings and on archived chats", () => {
+  it("hides rebind from callers who cannot change bindings", () => {
     renderHeader(
       {
         ...session,
@@ -328,6 +328,44 @@ describe("ChatSessionHeader Feishu channel state", () => {
       },
       { canChangeBinding: false },
     );
+    expect(
+      screen.queryByRole("button", { name: enChat.channel.rebind }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers rebind on an archived chat that still records its channel conversation", () => {
+    renderHeader(
+      {
+        ...session,
+        status: "archived",
+        channel_source: { ...channelSource, channel_chat_id: "chat-1" },
+        is_current_channel_route: false,
+      },
+      { canChangeBinding: true },
+    );
+
+    expect(
+      screen.getByRole("button", { name: enChat.channel.rebind }),
+    ).toBeInTheDocument();
+    expect(screen.getByTitle(
+      `${enChat.channel.feishu} · ${enChat.channel.historical_session}`,
+    )).toBeInTheDocument();
+  });
+
+  it("keeps the rebind entry on an archived chat whose binding row was deleted", () => {
+    renderHeader(
+      { ...session, status: "archived", channel_origin: true },
+      { canChangeBinding: true },
+    );
+
+    expect(
+      screen.getByRole("button", { name: enChat.channel.rebind }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no rebind on an archived chat with no channel provenance", () => {
+    renderHeader({ ...session, status: "archived" }, { canChangeBinding: true });
+
     expect(
       screen.queryByRole("button", { name: enChat.channel.rebind }),
     ).not.toBeInTheDocument();
