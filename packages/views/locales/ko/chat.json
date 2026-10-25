@@ -266,6 +266,7 @@
     "rebind": "다시 바인딩",
     "rebind_dialog": {
       "description": "이 채팅은 이전에 Feishu를 통해 사용되었습니다. 다시 바인딩하면 Feishu 메시지가 다시 이곳으로 들어옵니다.",
+      "archived_notice": "이 채팅은 보관되어 있습니다. 다시 바인딩하면 먼저 보관이 해제된 뒤 Feishu 경로가 복원됩니다.",
       "confirm": "다시 바인딩",
       "rebinding": "바인딩 중...",
       "cancel": "취소",
@@ -273,6 +274,7 @@
       "forbidden_error": "이 바인딩을 변경할 권한이 없습니다.",
       "not_found_error": "이 채팅은 더 이상 사용할 수 없습니다.",
       "generic_error": "다시 바인딩하지 못했습니다. 다시 시도하세요.",
+      "unarchive_error": "이 채팅의 보관을 해제하지 못해 보관 상태로 남아 있습니다. 다시 시도하세요.",
       "unavailable_title": "바인딩을 복원할 수 없습니다",
       "unavailable": "이전 버전에서 이 채팅의 Feishu 바인딩을 삭제해 원래 Feishu 대화가 기록에 남아 있지 않습니다. Feishu에서 에이전트에게 메시지를 보낸 뒤 새 채팅에서 '바인딩 채팅 변경'으로 이곳으로 되돌리세요.",
       "close": "확인"

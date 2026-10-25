@@ -266,6 +266,7 @@
     "rebind": "重新绑定",
     "rebind_dialog": {
       "description": "此会话此前通过飞书接收消息。重新绑定后，飞书消息会重新进入这里。",
+      "archived_notice": "该会话已归档。重新绑定会先取消归档，再恢复它的飞书路由。",
       "confirm": "重新绑定",
       "rebinding": "绑定中...",
       "cancel": "取消",
@@ -273,6 +274,7 @@
       "forbidden_error": "你无权更改此绑定。",
       "not_found_error": "该会话已不可用。",
       "generic_error": "重新绑定失败，请重试。",
+      "unarchive_error": "取消归档失败，该会话仍是归档状态，请重试。",
       "unavailable_title": "无法自动恢复绑定",
       "unavailable": "旧版本删除了此会话的飞书绑定，系统已不记得对应的飞书会话。请在飞书里给智能体发一条消息，再到新会话里用「更换绑定会话」把消息接回这里。",
       "close": "知道了"

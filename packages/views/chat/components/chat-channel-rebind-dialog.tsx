@@ -2,7 +2,10 @@
 
 import { useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
-import { useAttachChatSessionChannelBinding } from "@multica/core/chat/mutations";
+import {
+  useAttachChatSessionChannelBinding,
+  useSetChatSessionArchived,
+} from "@multica/core/chat/mutations";
 import type { ChatSession } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
 import {
@@ -17,7 +20,7 @@ import {
 } from "@multica/ui/components/ui/dialog";
 import { useT } from "../../i18n";
 
-type RebindError = "conflict" | "forbidden" | "not_found" | "generic";
+type RebindError = "conflict" | "forbidden" | "not_found" | "unarchive" | "generic";
 
 function errorKey(error: unknown): RebindError {
   if (typeof error === "object" && error !== null && "status" in error) {
@@ -34,6 +37,12 @@ function errorKey(error: unknown): RebindError {
  * retired that route (MP-70). No picker: the conversation is the one recorded on
  * the Chat's own binding, so the only decision is "yes".
  *
+ * Archiving is also what retired the route, and the attach endpoint only routes
+ * to an active Chat, so a confirmed rebind of an ARCHIVED Chat unarchives it
+ * first (MP-81). One confirmation covers both steps; if the attach then fails,
+ * the Chat stays unarchived — the state the user asked for — and the error is
+ * shown here for a retry.
+ *
  * A Chat whose binding row was deleted by an older version has provenance but no
  * recorded conversation — the ingested messages survive, the route does not. That
  * case gets the manual recovery path instead of a button the server would have to
@@ -42,12 +51,15 @@ function errorKey(error: unknown): RebindError {
 export function ChatChannelRebindDialog({ session }: { session: ChatSession }) {
   const { t } = useT("chat");
   const attach = useAttachChatSessionChannelBinding();
+  const setArchived = useSetChatSessionArchived();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<RebindError | null>(null);
 
   // channel_source is derived from a binding row in any state, so its presence
   // is exactly "the server still knows which Feishu conversation this was".
   const restorable = session.channel_source != null;
+  const isArchived = session.status === "archived";
+  const pending = attach.isPending || setArchived.isPending;
 
   const errorText = !error
     ? null
@@ -57,16 +69,28 @@ export function ChatChannelRebindDialog({ session }: { session: ChatSession }) {
         ? t(($) => $.channel.rebind_dialog.forbidden_error)
         : error === "not_found"
           ? t(($) => $.channel.rebind_dialog.not_found_error)
-          : t(($) => $.channel.rebind_dialog.generic_error);
+          : error === "unarchive"
+            ? t(($) => $.channel.rebind_dialog.unarchive_error)
+            : t(($) => $.channel.rebind_dialog.generic_error);
 
   const handleOpenChange = (next: boolean) => {
-    if (attach.isPending) return;
+    if (pending) return;
     if (next) setError(null);
     setOpen(next);
   };
 
   const handleConfirm = async () => {
     setError(null);
+    // Order matters: the server refuses to attach a route to a Chat that is not
+    // active, so the unarchive has to commit first.
+    if (isArchived) {
+      try {
+        await setArchived.mutateAsync({ sessionId: session.id, archived: false });
+      } catch {
+        setError("unarchive");
+        return;
+      }
+    }
     try {
       await attach.mutateAsync({ sessionId: session.id });
       setOpen(false);
@@ -104,6 +128,12 @@ export function ChatChannelRebindDialog({ session }: { session: ChatSession }) {
           </DialogDescription>
         </DialogHeader>
 
+        {restorable && isArchived && (
+          <p className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-caption text-muted-foreground">
+            {t(($) => $.channel.rebind_dialog.archived_notice)}
+          </p>
+        )}
+
         {errorText && (
           <p role="alert" className="text-caption text-destructive">
             {errorText}
@@ -119,11 +149,11 @@ export function ChatChannelRebindDialog({ session }: { session: ChatSession }) {
               <Button
                 type="button"
                 onClick={() => void handleConfirm()}
-                disabled={attach.isPending}
-                aria-busy={attach.isPending}
+                disabled={pending}
+                aria-busy={pending}
               >
-                {attach.isPending && <Loader2 className="size-4 animate-spin" />}
-                {attach.isPending
+                {pending && <Loader2 className="size-4 animate-spin" />}
+                {pending
                   ? t(($) => $.channel.rebind_dialog.rebinding)
                   : t(($) => $.channel.rebind_dialog.confirm)}
               </Button>
