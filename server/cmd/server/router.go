@@ -699,7 +699,14 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// bot_union_id during the device-flow finalize, so this
 				// is bridge code — it will simply find no rows to update
 				// on a fresh deployment and exit. MUL-2671.
-				go lark.BackfillBotUnionIDs(context.Background(), cs, larkClient, installSvc, slog.Default())
+				//
+				// Installations whose union_id Lark refuses to hand out
+				// (contact scope denied) are marked unavailable and
+				// skipped on later boots. MULTICA_LARK_UNION_ID_BACKFILL_FORCE=true
+				// re-probes them for this pass — the operator's retry path
+				// after granting the app contact permission. MP-82.
+				go lark.BackfillBotUnionIDs(context.Background(), cs, larkClient, installSvc, slog.Default(),
+					envBool("MULTICA_LARK_UNION_ID_BACKFILL_FORCE", false))
 
 				// Upgrade repair for deployments that ran the whole
 				// integration against Lark international via the deployment-
