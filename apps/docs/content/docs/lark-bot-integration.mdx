@@ -96,6 +96,16 @@ Restart the API server, then connect the Bot from the agent's **Integrations** p
 
 `MULTICA_LARK_HTTP_BASE_URL` and `MULTICA_LARK_CALLBACK_BASE_URL` exist only for special deployments such as proxies and testing; leave them unset in normal operation.
 
+### Bot union_id and mention disambiguation
+
+Attributing an @-mention to the right Bot in a group with several Multica bots needs that Bot's stable `union_id`. Multica captures it at connection time, and backfills existing installations on the first boot after an upgrade by calling Feishu's contact API. That call requires the app permission `contact:user.base:readonly`, with the Bot inside the app's permission scope. When Feishu refuses (`41050 no user authority error`), the installation is marked *union_id unavailable* with Lark's diagnostic, later restarts stop re-issuing the call, and mentions fall back to `open_id` matching. Direct messages and groups with a single Bot are unaffected; in a multi-bot group a mention may be attributed to the wrong Bot.
+
+After granting the permission and publishing a new app version, force one re-probe:
+
+1. Set `MULTICA_LARK_UNION_ID_BACKFILL_FORCE=true` in the `.env` file next to `docker-compose.selfhost.yml` (the compose file forwards it to the backend container) and restart the API server.
+2. Confirm the server log shows `lark backfill: stamped union_id` for that installation. The marker is cleared and later boots skip the probe.
+3. Remove the variable and restart normally. If the forced probe fails on a timeout or 5xx, the marker is cleared as well, so the next ordinary restart retries it.
+
 ## Troubleshooting
 
 - **No bind button**: confirm the current account is the agent's owner or a workspace owner or admin, and check that the self-hosting key is configured.

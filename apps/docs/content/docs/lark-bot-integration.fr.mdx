@@ -95,6 +95,16 @@ Redémarrez le serveur API, puis connectez le bot depuis la page **Intégrations
 
 `MULTICA_LARK_HTTP_BASE_URL` et `MULTICA_LARK_CALLBACK_BASE_URL` n'existent que pour des déploiements particuliers, comme les proxys et les tests ; laissez-les non définies en fonctionnement normal.
 
+### union_id du bot et résolution des mentions
+
+Pour rattacher une mention @ au bon bot dans un groupe qui contient plusieurs bots Multica, Multica a besoin de son `union_id` stable. Il est relevé à la connexion, et les installations existantes le récupèrent au premier démarrage après mise à jour via l'API Contacts de Feishu. Cet appel exige la permission `contact:user.base:readonly`, avec le bot dans le périmètre de l'application. Si Feishu refuse (`41050 no user authority error`), l'installation est marquée *union_id indisponible* avec le diagnostic renvoyé, les redémarrages suivants n'émettent plus l'appel, et les mentions se rabattent sur `open_id`. Les messages privés et les groupes à un seul bot ne sont pas affectés ; dans un groupe multi-bots, une mention peut être attribuée au mauvais bot.
+
+Après avoir accordé la permission et publié une nouvelle version de l'application, forcez une nouvelle tentative :
+
+1. Définissez `MULTICA_LARK_UNION_ID_BACKFILL_FORCE=true` dans le fichier `.env` à côté de `docker-compose.selfhost.yml` (le compose le transmet au conteneur backend), puis redémarrez le serveur API.
+2. Vérifiez que le journal affiche `lark backfill: stamped union_id` pour cette installation. Le marqueur est effacé et les démarrages suivants n'interrogent plus l'API.
+3. Retirez la variable et redémarrez normalement. Si la tentative forcée échoue sur un délai d'attente ou un 5xx, le marqueur est aussi effacé : le prochain redémarrage ordinaire réessaiera.
+
 ## Dépannage
 
 - **Aucun bouton d'association** : vérifiez que le compte actuel est le propriétaire de l'agent ou un propriétaire ou administrateur de l'espace de travail, et que la clé d'auto-hébergement est configurée.

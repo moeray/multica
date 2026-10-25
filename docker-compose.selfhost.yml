@@ -175,6 +175,13 @@ services:
       MULTICA_LARK_SECRET_KEY: ${MULTICA_LARK_SECRET_KEY:-}
       MULTICA_LARK_HTTP_BASE_URL: ${MULTICA_LARK_HTTP_BASE_URL:-}
       MULTICA_LARK_CALLBACK_BASE_URL: ${MULTICA_LARK_CALLBACK_BASE_URL:-}
+      # One-boot re-probe of bot union_id resolution, needed after the app is
+      # granted contact:user.base:readonly and republished: an installation
+      # whose union_id Lark previously refused (41050) is otherwise skipped
+      # forever. Set true for a single restart, then clear it. Listed here (and
+      # not only in .env) because this service takes an explicit environment
+      # whitelist — .env only feeds interpolation.
+      MULTICA_LARK_UNION_ID_BACKFILL_FORCE: ${MULTICA_LARK_UNION_ID_BACKFILL_FORCE:-}
       # Slack bot integration. MULTICA_SLACK_SECRET_KEY is the opt-in: unset =
       # integration disabled. It decrypts the per-installation bot/app tokens,
       # which are brought by each workspace via OAuth/BYO and stored encrypted
