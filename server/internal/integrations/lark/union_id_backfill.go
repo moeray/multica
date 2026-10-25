@@ -51,8 +51,11 @@ const unionIDUnavailableHint = "grant contact:user.base:readonly (and put the bo
 //     operator's re-probe path after the app is republished with contact
 //     permissions (MULTICA_LARK_UNION_ID_BACKFILL_FORCE=true); a
 //     re-install also clears the marker, and a successful probe clears it
-//     in place. Transient failures are never cached, so they retry on the
-//     next boot either way.
+//     in place. A forced probe that ends inconclusive (timeout / 5xx /
+//     unclassified empty result) also clears the marker rather than
+//     leaving it behind, so the next ordinary boot retries instead of
+//     silently resuming the skip. Only a fresh scope-denied answer keeps
+//     the marker. Transient failures are never cached either way.
 //
 //   - Callers should fire this from a separate goroutine at boot so a
 //     slow Lark round-trip cannot block HTTP listener startup. The
@@ -126,11 +129,19 @@ func BackfillBotUnionIDs(
 		cancel()
 		if err != nil {
 			// Transient (timeout / 5xx / token): no negative cache, so
-			// the next boot tries again.
+			// the next boot tries again. A FORCED re-probe that fails
+			// this way must also drop the marker from the earlier
+			// denied attempt: keeping it would make the next normal
+			// boot skip the install again, so the operator would have
+			// to remember to force a second time. bot_union_id itself
+			// is never touched here.
 			log.Warn("lark backfill: GetBotInfo failed",
 				"installation_id", uuidString(row.ID),
 				"app_id", row.AppID,
 				"err", err)
+			if alreadyMarked {
+				clearUnionIDUnavailableMarker(ctx, queries, row, now, log)
+			}
 			errored++
 			continue
 		}
@@ -138,11 +149,16 @@ func BackfillBotUnionIDs(
 			// The client could not classify the miss (no scope denial, but
 			// no value either). Do not cache it as unavailable — that
 			// would turn one bad minute into a permanently disabled
-			// mention path. Retry on the next boot, as before.
+			// mention path. Retry on the next boot, as before. For the
+			// same reason an inconclusive forced re-probe clears the
+			// marker it was meant to re-check.
 			log.Warn("lark backfill: union_id absent and unclassified; leaving NULL",
 				"installation_id", uuidString(row.ID),
 				"app_id", row.AppID,
 				"bot_open_id", string(info.OpenID))
+			if alreadyMarked {
+				clearUnionIDUnavailableMarker(ctx, queries, row, now, log)
+			}
 			missed++
 			continue
 		}
@@ -212,6 +228,34 @@ func BackfillBotUnionIDs(
 		"skipped", skipped,
 		"missed", missed,
 		"errored", errored)
+}
+
+// clearUnionIDUnavailableMarker drops the negative cache after a forced
+// re-probe that came back inconclusive (timeout / 5xx / unclassified
+// empty result). Those outcomes never justify a cache entry of their own,
+// and keeping the old one would silently restore the skip on the next
+// boot without the force switch. The row returns to the plain
+// "probe on next boot" state; bot_union_id is left untouched, so a
+// previously captured value can never be erased here.
+func clearUnionIDUnavailableMarker(
+	ctx context.Context,
+	queries UnionIDBackfillStore,
+	row Installation,
+	now string,
+	log *slog.Logger,
+) {
+	if err := queries.SetLarkInstallationBotUnionID(ctx, SetInstallationBotUnionIDParams{
+		ID:        row.ID,
+		CheckedAt: now,
+	}); err != nil {
+		log.Warn("lark backfill: clear union_id unavailable marker failed",
+			"installation_id", uuidString(row.ID),
+			"err", err)
+		return
+	}
+	log.Info("lark backfill: union_id unavailable marker cleared after inconclusive forced re-probe",
+		"installation_id", uuidString(row.ID),
+		"app_id", row.AppID)
 }
 
 // CredentialsDecrypter is the narrow surface BackfillBotUnionIDs needs

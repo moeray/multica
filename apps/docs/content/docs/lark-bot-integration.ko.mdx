@@ -94,6 +94,16 @@ API 서비스를 다시 시작한 뒤 에이전트의 **연동** 페이지에서
 
 `MULTICA_LARK_HTTP_BASE_URL`과 `MULTICA_LARK_CALLBACK_BASE_URL`은 프록시, 테스트 같은 특수한 배포에서만 사용하며 일반적으로 설정할 필요가 없습니다.
 
+### Bot union_id와 멘션 판별
+
+Multica 봇이 여러 개 있는 그룹에서 @ 멘션을 올바른 봇에 연결하려면 해당 봇의 안정적인 `union_id`가 필요합니다. 연결 시 수집하며, 기존 설치는 업그레이드 후 첫 부팅에서 Feishu 연락처 API로 보완합니다. 이 호출에는 앱 권한 `contact:user.base:readonly`가 필요하고 봇이 앱의 권한 범위에 포함되어야 합니다. Feishu가 거부하면(`41050 no user authority error`) 설치는 Feishu 진단 정보와 함께 *union_id 사용 불가*로 표시되고, 이후 재시작에서는 호출하지 않으며 멘션은 `open_id` 매칭으로 대체됩니다. DM과 봇이 하나뿐인 그룹은 영향을 받지 않습니다. 봇이 여러 개인 그룹에서는 멘션이 다른 봇으로 귀속될 수 있습니다.
+
+권한을 부여하고 새 앱 버전을 게시한 뒤 재시도를 한 번 강제합니다:
+
+1. `docker-compose.selfhost.yml`과 같은 디렉터리의 `.env`에 `MULTICA_LARK_UNION_ID_BACKFILL_FORCE=true`를 설정하고(compose가 backend 컨테이너로 전달합니다) API 서버를 재시작합니다.
+2. 로그에 해당 설치의 `lark backfill: stamped union_id`가 나타나는지 확인합니다. 마커가 지워지고 이후 부팅에서는 다시 시도하지 않습니다.
+3. 변수를 제거하고 평소대로 재시작합니다. 강제 재시도가 타임아웃이나 5xx로 실패해도 마커는 지워지므로 다음 일반 재시작에서 다시 시도합니다.
+
 ## 자주 묻는 문제
 
 - **연결 버튼이 없음**: 현재 계정이 에이전트 owner, 워크스페이스 owner, admin인지 확인하고 자체 호스팅 키가 설정되었는지 확인합니다.

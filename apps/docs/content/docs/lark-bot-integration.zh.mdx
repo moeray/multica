@@ -95,6 +95,16 @@ openssl rand -base64 32
 
 `MULTICA_LARK_HTTP_BASE_URL` 和 `MULTICA_LARK_CALLBACK_BASE_URL` 只用于代理、测试等特殊部署，正常情况下不需要设置。
 
+### Bot union_id 与 @ 消歧
+
+群里同时有多个 Multica 机器人时，要把一次 @ 提及对应到正确的 Bot，需要该 Bot 稳定的 `union_id`。Multica 在连接时获取它，升级后首次启动也会通过飞书通讯录接口为已有安装补齐。该调用要求应用具备 `contact:user.base:readonly` 权限，且 Bot 位于应用的通讯录权限范围内。若飞书拒绝（`41050 no user authority error`），安装会被标记为「union_id 不可用」并记录飞书返回的诊断信息，之后重启不再重复调用，@ 提及退化为 `open_id` 匹配。私聊和只有一个 Bot 的群不受影响；多 Bot 群中提及可能被归属到错误的 Bot。
+
+授予权限并发布新应用版本后，强制重探一次：
+
+1. 在 `docker-compose.selfhost.yml` 同目录的 `.env` 中设置 `MULTICA_LARK_UNION_ID_BACKFILL_FORCE=true`（compose 会把它透传给 backend 容器），然后重启 API 服务。
+2. 确认日志出现该安装的 `lark backfill: stamped union_id`。标记会被清除，之后启动不再探测。
+3. 去掉该变量并按正常方式重启。若强制重探遇到超时或 5xx，标记同样会被清除，下一次普通重启会再次尝试。
+
 ## 常见问题
 
 - **没有绑定按钮**：确认当前账号是智能体所有者、工作区 owner 或 admin，并检查自托管密钥是否已配置。
