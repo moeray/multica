@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -1582,6 +1583,86 @@ func TestHTTPClient_GetBotInfo_UnionIDLookupSoftFails(t *testing.T) {
 	}
 	if info.UnionID != "" {
 		t.Errorf("UnionID: got %q want empty (soft-fail leaves backfill to operator)", info.UnionID)
+	}
+	// MP-82: a permission denial is the STABLE "unavailable" state, not a
+	// transient fault, so the caller can record it once and stop probing.
+	if !info.UnionIDUnavailable {
+		t.Error("UnionIDUnavailable = false; a non-zero contact code must be classified unavailable")
+	}
+	if !strings.Contains(info.UnionIDReason, "99991002") {
+		t.Errorf("UnionIDReason: got %q want the Lark code", info.UnionIDReason)
+	}
+}
+
+// TestHTTPClient_GetBotInfo_41050IsQuietUnavailable pins the MP-82 log
+// contract at the client: 41050 "no user authority error" must NOT produce
+// a WARN (it fired on every boot and looked like a crash), while still
+// reporting the gap through BotInfo.
+func TestHTTPClient_GetBotInfo_41050IsQuietUnavailable(t *testing.T) {
+	fake := newLarkFake(t)
+	fake.stubToken("tok_bi_41050", 7200)
+	fake.mux.HandleFunc("/open-apis/bot/v3/info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"bot":  map[string]any{"open_id": "ou_bot_41050"},
+		})
+	})
+	fake.mux.HandleFunc("/open-apis/contact/v3/users/ou_bot_41050", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"code": 41050, "msg": "no user authority error"})
+	})
+	capture, logger := newLogCapture()
+	c := NewHTTPAPIClient(HTTPClientConfig{BaseURL: fake.URL(), Logger: logger})
+
+	info, err := c.GetBotInfo(context.Background(), testCreds())
+	if err != nil {
+		t.Fatalf("GetBotInfo: %v", err)
+	}
+	if string(info.OpenID) != "ou_bot_41050" {
+		t.Errorf("OpenID: got %q want ou_bot_41050 (open_id fallback stays usable)", info.OpenID)
+	}
+	if info.UnionID != "" {
+		t.Errorf("UnionID: got %q want empty", info.UnionID)
+	}
+	if !info.UnionIDUnavailable {
+		t.Error("UnionIDUnavailable = false; 41050 must be classified unavailable")
+	}
+	if !strings.Contains(info.UnionIDReason, "41050") {
+		t.Errorf("UnionIDReason: got %q want code=41050", info.UnionIDReason)
+	}
+	if n := capture.countAtOrAbove(slog.LevelWarn, ""); n != 0 {
+		t.Errorf("warnings: got %d want 0 for a denied contact scope", n)
+	}
+}
+
+// TestHTTPClient_GetBotInfo_TransientLookupFailureKeepsWarn is the other
+// side of that classification: an unexpected code is still worth a
+// warning and must NOT be recorded as the stable "unavailable" state.
+func TestHTTPClient_GetBotInfo_TransientLookupFailureKeepsWarn(t *testing.T) {
+	fake := newLarkFake(t)
+	fake.stubToken("tok_bi_5xx", 7200)
+	fake.mux.HandleFunc("/open-apis/bot/v3/info", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"code": 0,
+			"msg":  "ok",
+			"bot":  map[string]any{"open_id": "ou_bot_5xx"},
+		})
+	})
+	fake.mux.HandleFunc("/open-apis/contact/v3/users/ou_bot_5xx", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"code": 230020, "msg": "rate limit"})
+	})
+	capture, logger := newLogCapture()
+	c := NewHTTPAPIClient(HTTPClientConfig{BaseURL: fake.URL(), Logger: logger})
+
+	info, err := c.GetBotInfo(context.Background(), testCreds())
+	if err != nil {
+		t.Fatalf("GetBotInfo: %v", err)
+	}
+	if info.UnionIDUnavailable {
+		t.Error("UnionIDUnavailable = true; a transient failure must not be cached as unavailable")
+	}
+	if n := capture.countAtOrAbove(slog.LevelWarn, "union_id lookup failed"); n != 1 {
+		t.Errorf("warnings: got %d want 1", n)
 	}
 }
 

@@ -653,11 +653,14 @@ func (c *httpAPIClient) SendBindingPromptCard(ctx context.Context, p BindingProm
 // and avoid running the wrong supervisor for every event going
 // forward.
 //
-// A missing union_id (contact lookup denied by app scope, or Lark
-// returns an empty field) is NOT a hard failure here — the
-// installation is still usable for p2p chats and the decoder can
-// fall back to the (broken) open_id match path until the operator
-// fixes scopes. We log a warning so the gap is visible.
+// A missing union_id (contact scope denied by app scope, or Lark
+// returning an empty field) is NOT a hard failure here — the
+// installation is still usable for p2p chats and the decoder falls
+// back to the open_id match path until the operator fixes scopes.
+// Because that outcome is stable until an operator acts, it is
+// reported through BotInfo.UnionIDUnavailable / UnionIDReason rather
+// than an error or a per-call WARN, so callers can record the
+// diagnostic once per installation and skip re-probing.
 //
 // Other fields the upstream APIs return (display name, avatar, IP
 // whitelist) are deliberately dropped; downstream reads can fetch
@@ -688,18 +691,44 @@ func (c *httpAPIClient) GetBotInfo(ctx context.Context, creds InstallationCreden
 		return BotInfo{}, errors.New("lark http client: bot info: response missing open_id")
 	}
 
-	// Resolve union_id via the contact endpoint. Soft-fail: log and
-	// return the BotInfo with empty UnionID. Callers (Registration-
-	// Service.finishSuccess) accept the gap and persist what they
-	// have.
+	// Resolve union_id via the contact endpoint. Soft-fail: return the
+	// BotInfo with empty UnionID. Callers (RegistrationService and the
+	// boot backfill) accept the gap and persist what they have.
+	//
+	// A denied contact scope is a STABLE outcome, not a transient fault:
+	// every retry re-hits the same 41050 until an operator grants the
+	// permission and publishes a new app version. It therefore returns
+	// UnionIDUnavailable so the caller can record one diagnostic per
+	// installation and stop re-probing — no WARN here on every call.
+	// Anything else (timeout, 5xx, unexpected code) keeps the WARN,
+	// because that is news.
+	info := BotInfo{OpenID: OpenID(botResp.Bot.OpenID)}
 	unionID, lookupErr := c.fetchBotUnionID(ctx, creds, botResp.Bot.OpenID)
-	if lookupErr != nil {
-		c.cfg.Logger.Warn("lark http client: bot union_id lookup failed; continuing without it",
-			"app_id", creds.AppID,
-			"bot_open_id", botResp.Bot.OpenID,
-			"err", lookupErr)
+	switch {
+	case lookupErr == nil && unionID == "":
+		// code=0 with no union_id: Lark accepted the call but withheld
+		// the field (restricted scope). Also a stable "unavailable".
+		info.UnionIDUnavailable = true
+		info.UnionIDReason = "empty union_id in contact response"
+	case lookupErr == nil:
+		info.UnionID = unionID
+	default:
+		var denied *UnionIDUnavailableError
+		if errors.As(lookupErr, &denied) {
+			info.UnionIDUnavailable = true
+			info.UnionIDReason = denied.Diagnostic()
+			c.cfg.Logger.Debug("lark http client: bot union_id unavailable (contact scope denied)",
+				"app_id", creds.AppID,
+				"bot_open_id", botResp.Bot.OpenID,
+				"code", denied.Code)
+		} else {
+			c.cfg.Logger.Warn("lark http client: bot union_id lookup failed; continuing without it",
+				"app_id", creds.AppID,
+				"bot_open_id", botResp.Bot.OpenID,
+				"err", lookupErr)
+		}
 	}
-	return BotInfo{OpenID: OpenID(botResp.Bot.OpenID), UnionID: unionID}, nil
+	return info, nil
 }
 
 // GetMessage retrieves a message by id via
@@ -1271,6 +1300,45 @@ func (it larkRESTMessageItem) normalize() LarkMessage {
 	return m
 }
 
+// unionIDScopeDeniedCodes are the Lark/Feishu business codes that mean
+// "this app may not read this user through the contact API" — a scope
+// gap an operator has to close on the open platform, not a transient
+// fault. Retrying the same call over and over produces the same answer,
+// so callers treat these as the stable "union_id unavailable" state.
+//
+//	41050    no user authority error — the app has no contact scope, or
+//	         its contact scope does not cover the queried user.
+//	99991002 generic permission denial on the contact endpoint (the
+//	         same code the enricher classifies as permission_denied).
+var unionIDScopeDeniedCodes = map[int]struct{}{
+	41050:    {},
+	99991002: {},
+}
+
+// UnionIDUnavailableError marks a contact lookup refused for lack of
+// permission. It is deliberately a distinct type (not a wrapped
+// sentinel) so callers can pull the Lark code out for the persisted
+// installation diagnostic.
+type UnionIDUnavailableError struct {
+	Code int
+	Msg  string
+}
+
+func (e *UnionIDUnavailableError) Error() string {
+	return fmt.Sprintf("contact users: code=%d msg=%q (contact scope denied)", e.Code, e.Msg)
+}
+
+// Diagnostic renders the short, stable form recorded on the
+// installation ("code=41050 msg=\"no user authority error\"").
+func (e *UnionIDUnavailableError) Diagnostic() string {
+	return fmt.Sprintf("code=%d msg=%q", e.Code, e.Msg)
+}
+
+func isUnionIDScopeDenied(code int) bool {
+	_, ok := unionIDScopeDeniedCodes[code]
+	return ok
+}
+
 // fetchBotUnionID resolves a Bot's `union_id` from its `open_id` via
 // /open-apis/contact/v3/users/{open_id}?user_id_type=open_id. Split
 // out from GetBotInfo so the failure mode is explicit and the call
@@ -1281,6 +1349,10 @@ func (it larkRESTMessageItem) normalize() LarkMessage {
 // scope is restricted. Caller logs and continues; the decoder still
 // works in single-bot deployments where open_id-based matching is
 // unambiguous.
+//
+// A permission refusal comes back as *UnionIDUnavailableError so the
+// caller can tell "you will never get this until the app is
+// republished with contact permission" apart from "Lark hiccuped".
 func (c *httpAPIClient) fetchBotUnionID(ctx context.Context, creds InstallationCredentials, openID string) (string, error) {
 	if openID == "" {
 		return "", errors.New("empty open_id")
@@ -1298,6 +1370,13 @@ func (c *httpAPIClient) fetchBotUnionID(ctx context.Context, creds InstallationC
 		} `json:"data"`
 	}
 	if err := c.doAuthedJSON(ctx, creds, http.MethodGet, path, nil, &resp); err != nil {
+		// Lark reports permission refusals either as a 2xx envelope with
+		// a business code or as a non-2xx status carrying the same code
+		// in the body; larkErrorCode normalizes both shapes.
+		var statusErr *larkAPIStatusError
+		if errors.As(err, &statusErr) && isUnionIDScopeDenied(statusErr.Code) {
+			return "", &UnionIDUnavailableError{Code: statusErr.Code, Msg: statusErr.Msg}
+		}
 		return "", fmt.Errorf("contact users: %w", err)
 	}
 	if resp.Code != 0 {
@@ -1307,6 +1386,9 @@ func (c *httpAPIClient) fetchBotUnionID(ctx context.Context, creds InstallationC
 		// being reused on every retry until natural TTL expiry.
 		if isTokenError(resp.Code) {
 			c.invalidateToken(creds.AppID)
+		}
+		if isUnionIDScopeDenied(resp.Code) {
+			return "", &UnionIDUnavailableError{Code: resp.Code, Msg: resp.Msg}
 		}
 		return "", fmt.Errorf("contact users: code=%d msg=%q", resp.Code, resp.Msg)
 	}

@@ -57,6 +57,20 @@ type Installation struct {
 	UpdatedAt          pgtype.Timestamptz
 	BotUnionID         pgtype.Text
 	Region             string
+	// BotUnionIDStatus/BotUnionIDReason/BotUnionIDCheckedAt record the
+	// last union_id resolution attempt. They exist so a permission gap
+	// is visible in the installation diagnostics and so the boot
+	// backfill does not re-issue the same doomed contact lookup on every
+	// process start. BotUnionIDStatus is "" when the union_id resolved
+	// (or was never attempted), BotUnionIDStatusUnavailable when Lark
+	// refused to supply it.
+	//
+	// CheckedAt is the RFC3339 timestamp of that attempt, carried as a
+	// string because it lives only in the JSONB config — there is no
+	// column behind it.
+	BotUnionIDStatus    string
+	BotUnionIDReason    string
+	BotUnionIDCheckedAt string
 }
 
 // UserBinding is the flat view of a channel_user_binding row. ChannelUserID is
@@ -139,6 +153,10 @@ type feishuInstallConfig struct {
 	BotOpenID          string `json:"bot_open_id,omitempty"`
 	BotUnionID         string `json:"bot_union_id,omitempty"`
 	Region             string `json:"region,omitempty"`
+	// union_id resolution diagnostics — see Installation.
+	BotUnionIDStatus    string `json:"bot_union_id_status,omitempty"`
+	BotUnionIDReason    string `json:"bot_union_id_reason,omitempty"`
+	BotUnionIDCheckedAt string `json:"bot_union_id_checked_at,omitempty"`
 }
 
 // feishuBindingConfig is the JSON shape of channel_user_binding.config.
@@ -160,23 +178,26 @@ func installationFromRow(row db.ChannelInstallation) (Installation, error) {
 		return Installation{}, fmt.Errorf("decode app_secret_encrypted: %w", err)
 	}
 	return Installation{
-		ID:                 row.ID,
-		WorkspaceID:        row.WorkspaceID,
-		AgentID:            row.AgentID,
-		Purpose:            purposeOrDefault(row.Purpose),
-		AppID:              cfg.AppID,
-		AppSecretEncrypted: secret,
-		TenantKey:          textOrNull(cfg.TenantKey),
-		BotOpenID:          cfg.BotOpenID,
-		InstallerUserID:    row.InstallerUserID,
-		Status:             row.Status,
-		WsLeaseToken:       row.WsLeaseToken,
-		WsLeaseExpiresAt:   row.WsLeaseExpiresAt,
-		InstalledAt:        row.InstalledAt,
-		CreatedAt:          row.CreatedAt,
-		UpdatedAt:          row.UpdatedAt,
-		BotUnionID:         textOrNull(cfg.BotUnionID),
-		Region:             cfg.Region,
+		ID:                  row.ID,
+		WorkspaceID:         row.WorkspaceID,
+		AgentID:             row.AgentID,
+		Purpose:             purposeOrDefault(row.Purpose),
+		AppID:               cfg.AppID,
+		AppSecretEncrypted:  secret,
+		TenantKey:           textOrNull(cfg.TenantKey),
+		BotOpenID:           cfg.BotOpenID,
+		InstallerUserID:     row.InstallerUserID,
+		Status:              row.Status,
+		WsLeaseToken:        row.WsLeaseToken,
+		WsLeaseExpiresAt:    row.WsLeaseExpiresAt,
+		InstalledAt:         row.InstalledAt,
+		CreatedAt:           row.CreatedAt,
+		UpdatedAt:           row.UpdatedAt,
+		BotUnionID:          textOrNull(cfg.BotUnionID),
+		Region:              cfg.Region,
+		BotUnionIDStatus:    cfg.BotUnionIDStatus,
+		BotUnionIDReason:    cfg.BotUnionIDReason,
+		BotUnionIDCheckedAt: cfg.BotUnionIDCheckedAt,
 	}, nil
 }
 
@@ -195,15 +216,47 @@ func purposeOrDefault(purpose string) string {
 	return InstallationPurposeAgent
 }
 
+// BotUnionIDStatusUnavailable marks an installation whose bot union_id
+// could not be resolved because Lark denied the contact lookup (or
+// withheld the field). It is a NEGATIVE CACHE with an audit reason, not
+// a lock: the boot backfill skips these rows so a known-impossible call
+// is not re-issued on every restart, and clears the marker the moment a
+// probe succeeds (see BackfillBotUnionIDs and the
+// MULTICA_LARK_UNION_ID_BACKFILL_FORCE switch).
+const BotUnionIDStatusUnavailable = "unavailable"
+
+// applyBotUnionIDResolution folds one backfill resolution onto an
+// installation. It is the whole merge rule behind
+// SetLarkInstallationBotUnionID, kept pure so the "a failed re-probe must
+// never erase a captured union_id" invariant is testable without a
+// database:
+//
+//   - an INVALID arg.BotUnionID leaves the stored value untouched (a
+//     scope-denied probe carries no value to write);
+//   - Status/Reason/CheckedAt always describe the latest attempt, with
+//     Status "" clearing the unavailable marker.
+func applyBotUnionIDResolution(inst Installation, arg SetInstallationBotUnionIDParams) Installation {
+	if arg.BotUnionID.Valid {
+		inst.BotUnionID = arg.BotUnionID
+	}
+	inst.BotUnionIDStatus = arg.Status
+	inst.BotUnionIDReason = arg.Reason
+	inst.BotUnionIDCheckedAt = arg.CheckedAt
+	return inst
+}
+
 // encodeInstallConfig builds the channel_installation.config JSONB from the
 // feishu fields of an Installation. The secret is emitted as unwrapped base64.
 func encodeInstallConfig(inst Installation) ([]byte, error) {
 	cfg := feishuInstallConfig{
-		AppID:      inst.AppID,
-		TenantKey:  inst.TenantKey.String,
-		BotOpenID:  inst.BotOpenID,
-		BotUnionID: inst.BotUnionID.String,
-		Region:     inst.Region,
+		AppID:               inst.AppID,
+		TenantKey:           inst.TenantKey.String,
+		BotOpenID:           inst.BotOpenID,
+		BotUnionID:          inst.BotUnionID.String,
+		Region:              inst.Region,
+		BotUnionIDStatus:    inst.BotUnionIDStatus,
+		BotUnionIDReason:    inst.BotUnionIDReason,
+		BotUnionIDCheckedAt: inst.BotUnionIDCheckedAt,
 	}
 	if len(inst.AppSecretEncrypted) > 0 {
 		cfg.AppSecretEncrypted = base64.StdEncoding.EncodeToString(inst.AppSecretEncrypted)

@@ -31,25 +31,36 @@ type LarkInstallationResponse struct {
 	// Region is the Lark cloud this installation lives on: "feishu"
 	// (mainland) or "lark" (international). The UI uses it to render a
 	// badge and to build the correct "Manage in Lark" dev-console host.
-	Region      string `json:"region"`
-	InstalledAt string `json:"installed_at"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	Region string `json:"region"`
+	// BotUnionIDStatus is "unavailable" when Lark will not disclose the
+	// bot's union_id (contact scope denied). It is NOT an error state:
+	// inbound @-mentions fall back to open_id matching, which only
+	// misroutes when several bots share one group chat. Omitted when the
+	// union_id resolved, so the field doubles as the diagnostics flag.
+	BotUnionIDStatus string `json:"bot_union_id_status,omitempty"`
+	// BotUnionIDReason carries Lark's own diagnostic for that state
+	// (e.g. `code=41050 msg="no user authority error"`).
+	BotUnionIDReason string `json:"bot_union_id_reason,omitempty"`
+	InstalledAt      string `json:"installed_at"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 func larkInstallationToResponse(row lark.Installation) LarkInstallationResponse {
 	resp := LarkInstallationResponse{
-		ID:              uuidToString(row.ID),
-		WorkspaceID:     uuidToString(row.WorkspaceID),
-		AgentID:         uuidToString(row.AgentID),
-		AppID:           row.AppID,
-		BotOpenID:       row.BotOpenID,
-		InstallerUserID: uuidToString(row.InstallerUserID),
-		Status:          row.Status,
-		Region:          row.Region,
-		InstalledAt:     row.InstalledAt.Time.UTC().Format(time.RFC3339),
-		CreatedAt:       row.CreatedAt.Time.UTC().Format(time.RFC3339),
-		UpdatedAt:       row.UpdatedAt.Time.UTC().Format(time.RFC3339),
+		ID:               uuidToString(row.ID),
+		WorkspaceID:      uuidToString(row.WorkspaceID),
+		AgentID:          uuidToString(row.AgentID),
+		AppID:            row.AppID,
+		BotOpenID:        row.BotOpenID,
+		InstallerUserID:  uuidToString(row.InstallerUserID),
+		Status:           row.Status,
+		Region:           row.Region,
+		BotUnionIDStatus: row.BotUnionIDStatus,
+		BotUnionIDReason: row.BotUnionIDReason,
+		InstalledAt:      row.InstalledAt.Time.UTC().Format(time.RFC3339),
+		CreatedAt:        row.CreatedAt.Time.UTC().Format(time.RFC3339),
+		UpdatedAt:        row.UpdatedAt.Time.UTC().Format(time.RFC3339),
 	}
 	if row.TenantKey.Valid {
 		tk := row.TenantKey.String

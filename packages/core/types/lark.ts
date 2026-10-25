@@ -19,6 +19,14 @@ export interface LarkInstallation {
    * server that predates the field — defaults to Feishu in the UI
    * (see CLAUDE.md → API Response Compatibility). */
   region?: "feishu" | "lark" | string;
+  /** "unavailable" when Lark refuses to disclose the bot's union_id
+   * (the app lacks the contact permission). Not an error state: inbound
+   * @-mentions fall back to open_id matching, which only misroutes when
+   * several bots share one group chat. Absent once the union_id resolved. */
+  bot_union_id_status?: "unavailable" | string;
+  /** Lark's diagnostic for `bot_union_id_status`, e.g.
+   * `code=41050 msg="no user authority error"`. */
+  bot_union_id_reason?: string;
   installed_at: string;
   created_at: string;
   updated_at: string;
