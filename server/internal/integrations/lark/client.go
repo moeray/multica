@@ -271,6 +271,22 @@ type LarkMessageMention struct {
 type BotInfo struct {
 	OpenID  OpenID
 	UnionID string
+
+	// UnionIDUnavailable is set when Lark could not supply the bot's
+	// union_id for a reason that retrying will not fix on its own: the
+	// app's contact scope is denied (41050 "no user authority error",
+	// 99991002) or the contact endpoint answered code=0 with an empty
+	// union_id. The installation stays fully usable through the open_id
+	// fallback; callers record this marker so the gap is visible in the
+	// installation diagnostics instead of looking like a clean install.
+	// A TRANSIENT lookup failure (timeout, 5xx) leaves this false — that
+	// path keeps the existing WARN and is retried on the next boot.
+	UnionIDUnavailable bool
+
+	// UnionIDReason is the short, operator-facing diagnostic persisted
+	// with UnionIDUnavailable ("code=41050 msg=\"no user authority error\"",
+	// "empty union_id in contact response"). Empty otherwise.
+	UnionIDReason string
 }
 
 // SendCardParams is the input shape for posting a fresh card.

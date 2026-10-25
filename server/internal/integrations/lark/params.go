@@ -27,6 +27,12 @@ type UpsertInstallationParams struct {
 	TenantKey          pgtype.Text
 	BotUnionID         pgtype.Text
 	Region             string
+	// BotUnionIDStatus/BotUnionIDReason record a union_id resolution that
+	// came back "unavailable" at install time, so the fresh row carries the
+	// same diagnostic the backfill would later have written. Empty Status
+	// means the union_id resolved normally.
+	BotUnionIDStatus string
+	BotUnionIDReason string
 }
 
 // SetInstallationStatusParams flips an installation's status (active/revoked).
@@ -35,10 +41,18 @@ type SetInstallationStatusParams struct {
 	Status string
 }
 
-// SetInstallationBotUnionIDParams records the bot's union_id (backfill).
+// SetInstallationBotUnionIDParams records the bot's union_id resolution
+// (backfill). BotUnionID is written only when Valid: a failed re-probe
+// passes an invalid Text so an already-captured union_id is never erased.
+// Status "" clears the "unavailable" marker; Status
+// BotUnionIDStatusUnavailable records a permission gap together with its
+// Reason and the CheckedAt timestamp of the attempt.
 type SetInstallationBotUnionIDParams struct {
 	ID         pgtype.UUID
 	BotUnionID pgtype.Text
+	Status     string
+	Reason     string
+	CheckedAt  string
 }
 
 // AcquireWSLeaseParams fences the WS supervisor lease for an installation.

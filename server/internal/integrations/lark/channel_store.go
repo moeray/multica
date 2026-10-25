@@ -128,6 +128,8 @@ func (s *ChannelStore) UpsertLarkInstallation(ctx context.Context, arg UpsertIns
 		BotOpenID:          arg.BotOpenID,
 		BotUnionID:         arg.BotUnionID,
 		Region:             arg.Region,
+		BotUnionIDStatus:   arg.BotUnionIDStatus,
+		BotUnionIDReason:   arg.BotUnionIDReason,
 	})
 	if err != nil {
 		return Installation{}, err
@@ -199,11 +201,17 @@ func (s *ChannelStore) SetLarkInstallationStatus(ctx context.Context, arg SetIns
 	})
 }
 
-// SetLarkInstallationBotUnionID folds bot_union_id into the JSONB config via a
-// read-modify-write through SetChannelInstallationConfig (channel_installation
-// has no dedicated union_id column). This is the operator union_id backfill,
-// keyed by id and effectively single-writer, so the non-atomic RMW is safe —
-// the same shape the channel.sql comment documents for this query.
+// SetLarkInstallationBotUnionID folds the union_id resolution into the JSONB
+// config via a read-modify-write through SetChannelInstallationConfig
+// (channel_installation has no dedicated union_id column). This is the operator
+// union_id backfill, keyed by id and effectively single-writer, so the
+// non-atomic RMW is safe — the same shape the channel.sql comment documents for
+// this query.
+//
+// Only fields the caller actually decided are written: an invalid arg.BotUnionID
+// leaves the stored union_id alone (a failed re-probe must never erase a value a
+// previous, successful lookup captured), and arg.Status/Reason/CheckedAt always
+// describe the latest attempt — "" clearing the "unavailable" marker.
 func (s *ChannelStore) SetLarkInstallationBotUnionID(ctx context.Context, arg SetInstallationBotUnionIDParams) error {
 	row, err := s.Queries.GetChannelInstallation(ctx, db.GetChannelInstallationParams{
 		ID:          arg.ID,
@@ -216,7 +224,7 @@ func (s *ChannelStore) SetLarkInstallationBotUnionID(ctx context.Context, arg Se
 	if err != nil {
 		return err
 	}
-	inst.BotUnionID = arg.BotUnionID
+	inst = applyBotUnionIDResolution(inst, arg)
 	cfg, err := encodeInstallConfig(inst)
 	if err != nil {
 		return err

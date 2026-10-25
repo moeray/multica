@@ -705,6 +705,22 @@ func (s *RegistrationService) finishSuccess(ctx context.Context, sess *registrat
 		s.markError(sess, RegistrationReasonBotInfoFailed, "bot info missing open_id")
 		return
 	}
+	// A denied contact scope is not an install failure — the bot works
+	// through the open_id fallback — but it must not look like a clean
+	// install either. Record it on the row (so the diagnostics show
+	// "union_id unavailable" and the boot backfill skips the doomed
+	// re-probe) and say so once, here.
+	unionIDStatus, unionIDReason := "", ""
+	if info.UnionIDUnavailable {
+		unionIDStatus = BotUnionIDStatusUnavailable
+		unionIDReason = info.UnionIDReason
+		s.cfg.Logger.Info("lark registration: bot union_id unavailable; open_id fallback stays in effect",
+			"session_id", sess.id,
+			"app_id", res.ClientID,
+			"bot_open_id", string(info.OpenID),
+			"reason", info.UnionIDReason,
+			"how_to_fix", unionIDUnavailableHint)
+	}
 
 	// Encrypt the app_secret before the transaction so the seal cost
 	// doesn't sit inside the DB lock. The InstallationService's Upsert
@@ -757,6 +773,8 @@ func (s *RegistrationService) finishSuccess(ctx context.Context, sess *registrat
 		BotUnionID:         textOrNull(info.UnionID),
 		InstallerUserID:    sess.initiatorID,
 		Region:             string(region),
+		BotUnionIDStatus:   unionIDStatus,
+		BotUnionIDReason:   unionIDReason,
 	})
 	if err != nil {
 		s.cfg.Logger.Warn("lark registration: upsert installation",
