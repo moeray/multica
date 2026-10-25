@@ -2172,9 +2172,13 @@ func (s *TaskService) enqueueChatTaskTx(
 	}
 	// Server-authored mirror messages (review results) have no producing turn,
 	// so task_id cannot carry them into the resume context. Stamp them for THIS
-	// turn in the same transaction that creates the task, next to the input
-	// seal above, so the turn either exists with its injected context or not at
-	// all (MP-68).
+	// turn in the transaction that creates the task, next to the input seal
+	// above: the turn's input batch and the mirrors it must read are one batch,
+	// committed atomically with the task row or not at all. That atomicity is
+	// why this runs at enqueue rather than at claim. Cancellation is not the
+	// argument: a turn cancelled while still queued never claims, and
+	// releaseChatContextStamp hands its mirrors back to the pool for the next
+	// turn (MP-68, MP-73).
 	if err := qtx.LinkPendingAgentChatMessagesToTask(
 		ctx, db.LinkPendingAgentChatMessagesToTaskParams{
 			TaskID: task.ID, ChatSessionID: chatSession.ID,
