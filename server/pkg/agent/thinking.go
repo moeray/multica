@@ -397,6 +397,19 @@ func runCodexDebugModels(ctx context.Context, runtimeCmd Command, args ...string
 // parseCodexModelCatalog projects the CLI's raw catalog into the daemon wire
 // model. Hidden entries are intentionally excluded to match Codex's own model
 // picker; the first visible entry is the catalog's preferred default.
+// codexCatalogProvider reads the channel out of a namespaced model id.
+// Codex's model catalog has no `provider` field: `codex debug models` drops it,
+// so a selector such as "wb-proxy/hy4std" is the only channel marker that
+// survives discovery. Bare ids keep the built-in OpenAI provider, which leaves
+// the existing picker grouping untouched for unqualified models.
+func codexCatalogProvider(id string) string {
+	prefix, _, ok := strings.Cut(id, "/")
+	if ok && prefix != "" {
+		return prefix
+	}
+	return "openai"
+}
+
 func parseCodexModelCatalog(raw []byte) ([]Model, error) {
 	var resp codexDebugModelsResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -415,7 +428,7 @@ func parseCodexModelCatalog(raw []byte) ([]Model, error) {
 		models = append(models, Model{
 			ID:           m.Slug,
 			Label:        label,
-			Provider:     "openai",
+			Provider:     codexCatalogProvider(m.Slug),
 			Thinking:     codexThinkingFromDebugModel(m),
 			ServiceTiers: codexServiceTiersFromDebugModel(m),
 		})

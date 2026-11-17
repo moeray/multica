@@ -2016,7 +2016,31 @@ func codexTurnInput(prompt string, resumeExpected, resumed bool, notice string) 
 // answer a fresh start request. The returned threadID is what subsequent
 // turn/start calls must reference, and resumed indicates whether the prior
 // thread was picked up (only useful for logging).
+// splitCodexModelSelector splits a namespaced selector ("wb-proxy/hy4std")
+// into the bare model id and the provider id that app-server's thread/start
+// accepts as `modelProvider`. The prefix set is deliberately explicit: a bare
+// id, or a slash-shaped id owned by a different runtime, reaches the CLI
+// verbatim so this cannot silently rewrite a model the user typed by hand.
+//
+// "openai" is the built-in default provider; selecting it explicitly is legal
+// but unnecessary, so it is folded back into the bare-id path (empty provider).
+func splitCodexModelSelector(model string) (modelID string, providerID string) {
+	prefix, rest, ok := strings.Cut(model, "/")
+	if !ok || prefix == "" || rest == "" {
+		return model, ""
+	}
+	switch prefix {
+	case "openai":
+		return rest, ""
+	case "wb-proxy":
+		return rest, prefix
+	default:
+		return model, ""
+	}
+}
+
 func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions, logger *slog.Logger) (string, bool, error) {
+	modelID, providerID := splitCodexModelSelector(opts.Model)
 	if priorThreadID := opts.ResumeSessionID; priorThreadID != "" {
 		// thread/resume reuses the thread's persisted model and reasoning
 		// effort; only override fields the daemon actually cares about.
@@ -2025,7 +2049,8 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		resumeParams := map[string]any{
 			"threadId":              priorThreadID,
 			"cwd":                   opts.Cwd,
-			"model":                 nilIfEmpty(opts.Model),
+			"model":                 nilIfEmpty(modelID),
+			"modelProvider":         nilIfEmpty(providerID),
 			"developerInstructions": nil,
 			// Only omit history from the response, not the resumed model context.
 			// We need the thread ID, not an unbounded single-line turns payload.
@@ -2082,8 +2107,8 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 	// app-server (thread/start -> turn/start) with developerInstructions unset
 	// (MUL-5392).
 	startParams := map[string]any{
-		"model":                  nilIfEmpty(opts.Model),
-		"modelProvider":          nil,
+		"model":                  nilIfEmpty(modelID),
+		"modelProvider":          nilIfEmpty(providerID),
 		"profile":                nil,
 		"cwd":                    opts.Cwd,
 		"approvalPolicy":         nil,
