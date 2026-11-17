@@ -2016,27 +2016,25 @@ func codexTurnInput(prompt string, resumeExpected, resumed bool, notice string) 
 // answer a fresh start request. The returned threadID is what subsequent
 // turn/start calls must reference, and resumed indicates whether the prior
 // thread was picked up (only useful for logging).
-// splitCodexModelSelector splits a namespaced selector ("wb-proxy/hy4std")
-// into the bare model id and the provider id that app-server's thread/start
-// accepts as `modelProvider`. The prefix set is deliberately explicit: a bare
-// id, or a slash-shaped id owned by a different runtime, reaches the CLI
-// verbatim so this cannot silently rewrite a model the user typed by hand.
+// splitCodexModelSelector splits a namespaced selector ("wb-proxy/hy4std",
+// "openai/gpt-6.1-sol") into the bare model id and the provider id that
+// app-server's thread/start accepts as `modelProvider`.
 //
-// "openai" is the built-in default provider; selecting it explicitly is legal
-// but unnecessary, so it is folded back into the bare-id path (empty provider).
+// Both prefixes are sent explicitly. In particular "openai" is NOT folded into
+// an empty provider: config.toml may default to wb-proxy, and an empty
+// modelProvider would then inherit that default and silently send an
+// "openai/..." pick to the local gateway. Verified against app-server: with a
+// wb-proxy default, modelProvider="openai" correctly yields provider=openai.
+//
+// The prefix set comes from codexProviderPrefix so catalog grouping and launch
+// routing cannot drift apart. Unknown prefixes and bare ids reach the CLI
+// verbatim, preserving hand-typed models and the pre-fork behaviour.
 func splitCodexModelSelector(model string) (modelID string, providerID string) {
-	prefix, rest, ok := strings.Cut(model, "/")
-	if !ok || prefix == "" || rest == "" {
+	prefix, bare, known := codexProviderPrefix(model)
+	if !known {
 		return model, ""
 	}
-	switch prefix {
-	case "openai":
-		return rest, ""
-	case "wb-proxy":
-		return rest, prefix
-	default:
-		return model, ""
-	}
+	return bare, prefix
 }
 
 func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions, logger *slog.Logger) (string, bool, error) {
@@ -2076,7 +2074,25 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		)
 		resumeResult, err := c.request(ctx, "thread/resume", resumeParams)
 		if err == nil {
-			if threadID := extractThreadID(resumeResult); threadID != "" {
+			threadID := extractThreadID(resumeResult)
+			// app-server ignores model/modelProvider on thread/resume: the
+			// thread keeps the provider it was created with (verified
+			// end-to-end against codex-cli 0.169). Reusing such a thread
+			// after the operator switched channels would silently send the
+			// task to the old gateway. Detect the mismatch and fall through
+			// to thread/start so the new channel takes effect.
+			resumedProvider := extractThreadProvider(resumeResult)
+			providerMismatch := providerID != "" && resumedProvider != "" &&
+				!strings.EqualFold(resumedProvider, providerID)
+			if threadID != "" && providerMismatch {
+				logger.Warn("codex thread/resume kept a different provider; starting a fresh thread",
+					"task_id", c.cfg.TaskID,
+					"prior_thread_id", priorThreadID,
+					"resumed_provider", resumedProvider,
+					"requested_provider", providerID,
+				)
+			}
+			if threadID != "" && !providerMismatch {
 				logger.Info("codex lifecycle",
 					"phase", "thread_resume_response",
 					"task_id", c.cfg.TaskID,
@@ -2090,7 +2106,9 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 				)
 				return threadID, true, nil
 			}
-			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
+			if threadID == "" {
+				logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
+			}
 		} else {
 			if isCodexTransportError(err) {
 				logger.Warn("codex thread/resume failed due to transport error; not falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
@@ -4341,6 +4359,22 @@ func extractThreadID(result json.RawMessage) string {
 		return ""
 	}
 	return r.Thread.ID
+}
+
+// extractThreadProvider reads the provider a resumed thread was created with.
+// An empty string means app-server did not report one; callers must treat that
+// as "unknown" rather than as a mismatch, so older binaries keep their
+// previous resume behaviour.
+func extractThreadProvider(result json.RawMessage) string {
+	var r struct {
+		Thread struct {
+			ModelProvider string `json:"modelProvider"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return ""
+	}
+	return r.Thread.ModelProvider
 }
 
 func extractNestedString(m map[string]any, keys ...string) string {

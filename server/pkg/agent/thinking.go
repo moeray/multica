@@ -397,17 +397,36 @@ func runCodexDebugModels(ctx context.Context, runtimeCmd Command, args ...string
 // parseCodexModelCatalog projects the CLI's raw catalog into the daemon wire
 // model. Hidden entries are intentionally excluded to match Codex's own model
 // picker; the first visible entry is the catalog's preferred default.
+// codexProviderPrefix is the single source of truth for the closed set of
+// provider prefixes this fork understands. Both catalog grouping and the
+// app-server launch params go through it, so a prefix can never be displayed
+// in the picker yet silently fall through to the default channel at launch.
+// An unqualified id (bare, or a slash-shaped id owned by another runtime) is
+// reported as unknown and must reach the CLI verbatim.
+func codexProviderPrefix(id string) (prefix, bare string, known bool) {
+	prefix, bare, ok := strings.Cut(id, "/")
+	if !ok || prefix == "" || bare == "" {
+		return "", id, false
+	}
+	switch prefix {
+	case "openai", "wb-proxy":
+		return prefix, bare, true
+	default:
+		return "", id, false
+	}
+}
+
 // codexCatalogProvider reads the channel out of a namespaced model id.
 // Codex's model catalog has no `provider` field: `codex debug models` drops it,
 // so a selector such as "wb-proxy/hy4std" is the only channel marker that
 // survives discovery. Bare ids keep the built-in OpenAI provider, which leaves
 // the existing picker grouping untouched for unqualified models.
 func codexCatalogProvider(id string) string {
-	prefix, _, ok := strings.Cut(id, "/")
-	if ok && prefix != "" {
-		return prefix
+	prefix, _, known := codexProviderPrefix(id)
+	if !known {
+		return "openai"
 	}
-	return "openai"
+	return prefix
 }
 
 func parseCodexModelCatalog(raw []byte) ([]Model, error) {
